@@ -13,6 +13,7 @@ enum ParamType : FFUInt32
 	PT_SEARCH,
 	PT_FIT,
 	PT_CURSOR,
+	PT_RESTORE_MINIMIZED,
 	PT_CROP_LEFT,
 	PT_CROP_RIGHT,
 	PT_CROP_TOP,
@@ -114,6 +115,7 @@ ScreenCapture::ScreenCapture()
 	SetParamElementInfo( PT_FIT, FIT_COVER, "Rellenar", static_cast< float >( FIT_COVER ) );
 
 	SetParamInfo( PT_CURSOR, "Mostrar cursor", FF_TYPE_BOOLEAN, showCursor );
+	SetParamInfo( PT_RESTORE_MINIMIZED, "Restaurar si se minimiza", FF_TYPE_BOOLEAN, restoreMinimized );
 
 	SetParamInfo( PT_CROP_LEFT, "Izquierda", FF_TYPE_STANDARD, 0.0f );
 	SetParamInfo( PT_CROP_RIGHT, "Derecha", FF_TYPE_STANDARD, 0.0f );
@@ -427,6 +429,10 @@ FFResult ScreenCapture::SetFloatParameter( unsigned int index, float value )
 		showCursor = value > 0.5f;
 		capture.SetCursorVisible( showCursor );
 		break;
+	case PT_RESTORE_MINIMIZED:
+		restoreMinimized = value > 0.5f;
+		capture.SetRestoreMinimized( restoreMinimized );
+		break;
 	case PT_CROP_LEFT:
 	case PT_CROP_RIGHT:
 	case PT_CROP_TOP:
@@ -463,6 +469,8 @@ float ScreenCapture::GetFloatParameter( unsigned int index )
 		return static_cast< float >( fitMode );
 	case PT_CURSOR:
 		return showCursor ? 1.0f : 0.0f;
+	case PT_RESTORE_MINIMIZED:
+		return restoreMinimized ? 1.0f : 0.0f;
 	case PT_CROP_LEFT:
 	case PT_CROP_RIGHT:
 	case PT_CROP_TOP:

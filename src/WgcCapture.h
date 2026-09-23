@@ -26,6 +26,7 @@ public:
 	void Start( const CaptureTarget& target, bool showCursor );
 	void Stop();
 	void SetCursorVisible( bool visible );
+	void SetRestoreMinimized( bool restore );//Show a minimized captured window again, behind all others.
 
 	bool IsActive() const; //Starting or capturing.
 	bool WasClosed() const;//The captured window was closed or the monitor was disconnected.

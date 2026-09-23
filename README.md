@@ -28,6 +28,7 @@ Sube este proyecto a un repositorio de GitHub. El workflow `.github/workflows/bu
 | **Buscar ventana** | Escribe parte del título o del programa, por ejemplo `powerpnt`, `chrome` o `pantalla 2`. Es la forma **recomendada** para shows: se guarda con la composición y, si la ventana se cierra y se vuelve a abrir, la captura vuelve sola en unos 2 segundos. |
 | **Ajuste** | *Estirar* llena todo aunque deforme la imagen. *Encajar* mantiene las proporciones con bordes transparentes. *Rellenar* mantiene las proporciones y recorta lo que sobra. |
 | **Mostrar cursor** | Muestra u oculta el puntero del mouse en la captura. |
+| **Restaurar si se minimiza** | Si la ventana capturada se minimiza, el plugin la vuelve a abrir **detrás de todas las demás**, sin quitarte el foco, para que siga viéndose en vivo en Arena. Desactivado: se congela la última imagen hasta que la restaures. |
 | **Recorte** (izquierda, derecha, arriba, abajo) | Recorta los bordes, por ejemplo la barra de título o la del navegador. Cada control llega hasta el 50 %. |
 | **Actualización** | Estado del plugin y botones *Instalar*, *Más tarde* y *Omitir versión*. Solo aparece en las versiones publicadas (ver abajo). |
 
@@ -63,7 +64,7 @@ cmake -S . -B build -A x64 -DPLUGIN_VERSION=1.0.0 -DUPDATE_MANIFEST_URL=https://
 **Seguridad:** solo se aceptan descargas por HTTPS y el archivo debe coincidir con el SHA-256 del manifiesto. Aun así, quien controle tu cuenta de GitHub puede publicar un plugin. Protege la cuenta con autenticación de dos factores.
 
 ## Notas y limitaciones
-- **Las ventanas minimizadas no se capturan.** Windows no las dibuja, así que la imagen se queda en negro o transparente. Déjalas abiertas, aunque estén detrás de otras ventanas.
+- **Windows no dibuja las ventanas minimizadas.** Por eso existe *Restaurar si se minimiza*, que la devuelve detrás de las demás. Con esa opción apagada, Arena se queda con la última imagen.
 - En la lista, la ventana se guarda por posición. Al reabrir una composición puede apuntar a otra ventana, por eso conviene usar **Buscar ventana**.
 - En Windows 10 aparece un **borde amarillo** alrededor de lo que se captura. Windows 11 permite ocultarlo y el plugin lo hace automáticamente.
 - La captura corre en un hilo propio, así que Arena nunca espera a Windows al cambiar de fuente.

@@ -35,6 +35,8 @@ const wgd::DirectXPixelFormat PIXEL_FORMAT = wgd::DirectXPixelFormat::B8G8R8A8UI
 const int FRAME_BUFFERS                    = 2;
 const DWORD IDLE_WAKE_MS                   = 100;
 const DWORD SHUTDOWN_WAIT_MS               = 3000;
+const std::chrono::milliseconds MINIMIZED_CHECK_INTERVAL( 250 );
+const std::chrono::seconds RESTORE_RETRY_INTERVAL( 2 );
 
 // Lets threads we don't own (Resolume's) make WinRT calls without initializing COM on them.
 void EnsureWinRTUsable()
@@ -104,6 +106,7 @@ struct WgcCapture::Impl
 	std::mutex mutex;
 	CaptureTarget wantedTarget;
 	bool wantedCursor         = true;
+	bool wantedRestore        = true;//Bring the captured window back (behind the others) when it's minimized.
 	uint64_t wantedGeneration = 0;//Bumped by every Start/Stop.
 	bool quit                 = false;
 
@@ -134,6 +137,10 @@ struct WgcCapture::Impl
 	wg::SizeInt32 poolSize{};
 	uint64_t activeGeneration = 0;
 	bool activeCursor         = true;
+	HWND activeWindow         = nullptr;
+	bool wasMinimized         = false;
+	std::chrono::steady_clock::time_point lastMinimizedCheck;
+	std::chrono::steady_clock::time_point lastRestore;
 	std::string activeLabel;
 	std::chrono::steady_clock::time_point startTime;
 	bool gotFirstFrame = false;
@@ -175,6 +182,7 @@ struct WgcCapture::Impl
 
 			CaptureTarget target;
 			bool cursor;
+			bool restore;
 			uint64_t generation;
 			{
 				std::lock_guard< std::mutex > lock( mutex );
@@ -182,6 +190,7 @@ struct WgcCapture::Impl
 					break;
 				target     = wantedTarget;
 				cursor     = wantedCursor;
+				restore    = wantedRestore;
 				generation = wantedGeneration;
 			}
 
@@ -207,7 +216,10 @@ struct WgcCapture::Impl
 			}
 
 			if( session )
+			{
+				HandleMinimized( restore );
 				ReadNewestFrame();
+			}
 		}
 
 		Close();
@@ -234,8 +246,35 @@ struct WgcCapture::Impl
 		return true;
 	}
 
+	// Windows stops drawing minimized windows, so there is nothing to capture. Showing the window
+	// again at the very bottom of the stack keeps it live in Arena without covering anything.
+	void HandleMinimized( bool restore )
+	{
+		if( activeWindow == nullptr )
+			return;
+		auto now = std::chrono::steady_clock::now();
+		if( now - lastMinimizedCheck < MINIMIZED_CHECK_INTERVAL )
+			return;
+		lastMinimizedCheck = now;
+
+		bool minimized = IsIconic( activeWindow ) != FALSE;
+		if( minimized && !wasMinimized )
+			LogToFile( restore ? "Ventana minimizada, se restaura detras de las demas: " + activeLabel
+			                   : "Ventana minimizada, se mantiene la ultima imagen: " + activeLabel );
+		wasMinimized = minimized;
+		if( !minimized || !restore || now - lastRestore < RESTORE_RETRY_INTERVAL )
+			return;
+		lastRestore = now;
+
+		//Async versions: never wait on the other program, it might be busy or frozen.
+		ShowWindowAsync( activeWindow, SW_SHOWNOACTIVATE );
+		SetWindowPos( activeWindow, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS );
+	}
+
 	void Open( const CaptureTarget& target, bool cursor )
 	{
+		activeWindow  = target.kind == CaptureTarget::Kind::Window ? target.window : nullptr;
+		wasMinimized  = false;
 		activeLabel   = target.label;
 		gotFirstFrame = false;
 		startTime     = std::chrono::steady_clock::now();
@@ -322,9 +361,10 @@ struct WgcCapture::Impl
 		catch( ... )
 		{
 		}
-		session   = nullptr;
-		framePool = nullptr;
-		item      = nullptr;
+		session      = nullptr;
+		framePool    = nullptr;
+		item         = nullptr;
+		activeWindow = nullptr;
 	}
 
 	void ApplyCursor( bool cursor )
@@ -391,10 +431,11 @@ struct WgcCapture::Impl
 			texture->GetDesc( &desc );
 			UINT width  = contentSize.Width > 0 ? static_cast< UINT >( contentSize.Width ) : 0;
 			UINT height = contentSize.Height > 0 ? static_cast< UINT >( contentSize.Height ) : 0;
-			width       = width < desc.Width ? width : desc.Width;
-			height      = height < desc.Height ? height : desc.Height;
+			//A minimized window reports a tiny size, and right after it's restored the buffers are still
+			//too small. Skip those frames so Arena keeps showing the last good image instead.
+			bool usable = width > 1 && height > 1 && width <= desc.Width && height <= desc.Height;
 
-			if( width > 0 && height > 0 )
+			if( usable )
 			{
 				EnsureStaging( width, height );
 				D3D11_BOX box{ 0, 0, 0, width, height, 1 };
@@ -506,6 +547,15 @@ void WgcCapture::Stop()
 		++impl->wantedGeneration;
 	}
 	impl->phase = Phase::Idle;
+	SetEvent( impl->wakeEvent );
+}
+
+void WgcCapture::SetRestoreMinimized( bool restore )
+{
+	{
+		std::lock_guard< std::mutex > lock( impl->mutex );
+		impl->wantedRestore = restore;
+	}
 	SetEvent( impl->wakeEvent );
 }
 
