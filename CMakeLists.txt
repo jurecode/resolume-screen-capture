@@ -56,6 +56,8 @@ target_compile_definitions(ScreenCapture PRIVATE
     UPDATE_MANIFEST_URL="${UPDATE_MANIFEST_URL}"
 )
 target_compile_options(ScreenCapture PRIVATE /EHsc /utf-8 /bigobj /MP)
+# The bundled glew32s.lib was built against the static CRT; we use the dll CRT like FFGL.
+target_link_options(ScreenCapture PRIVATE /NODEFAULTLIB:LIBCMT)
 target_link_libraries(ScreenCapture PRIVATE
     opengl32
     d3d11
