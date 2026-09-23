@@ -48,6 +48,7 @@ Sube este proyecto a un repositorio de GitHub. El workflow `.github/workflows/bu
 | **Ajuste** | *Estirar* llena todo aunque deforme la imagen. *Encajar* mantiene las proporciones con bordes transparentes. *Rellenar* mantiene las proporciones y recorta lo que sobra. |
 | **Mostrar cursor** | Muestra u oculta el puntero del mouse en la captura. |
 | **Restaurar si se minimiza** | Si la ventana capturada se minimiza, el plugin la vuelve a abrir **detrás de todas las demás**, sin quitarte el foco, para que siga viéndose en vivo en Arena. Desactivado: se congela la última imagen hasta que la restaures. |
+| **Solo contenido** (Windows) | Captura solo la **foto o el video** de la ventana, sin barras de herramientas ni bordes. Sirve para la app **Fotos**, el **Reproductor multimedia** y **Películas y TV**. El recorte se ajusta solo si cambias el tamaño de la ventana o la foto. Los controles que aparecen *encima* del video (Play, barra de tiempo) se esconden solos si no mueves el mouse sobre el reproductor. |
 | **Recorte** (izquierda, derecha, arriba, abajo) | Recorta los bordes, por ejemplo la barra de título o la del navegador. Cada control llega hasta el 50 %. |
 | **Actualización** | Estado del plugin y botones *Instalar*, *Más tarde* y *Omitir versión*. Solo aparece en las versiones publicadas (ver abajo). |
 
