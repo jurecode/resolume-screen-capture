@@ -156,10 +156,10 @@ add_ffgl_plugin(Zocalo
     BUNDLE_ID       com.jurecode.resolume-zocalo
     SOURCES
         src/zocalo/Zocalo.cpp src/zocalo/Zocalo.h src/zocalo/ZocaloThumbnail.cpp
-        src/Drawing.h
+        src/Drawing.h src/OscListener.cpp src/OscListener.h
     WIN_SOURCES src/win/DrawingWin.cpp
     MAC_SOURCES src/mac/DrawingMac.mm
-    WIN_LIBRARIES windowscodecs windowsapp
+    WIN_LIBRARIES windowscodecs windowsapp ws2_32
     MAC_FRAMEWORKS CoreText ImageIO
 )
 

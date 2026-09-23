@@ -105,6 +105,16 @@ Segundo plugin del proyecto: **Zocalo**, en *Sources*. Presenta a una persona co
 | **Tamano / Velocidad** | Escala del conjunto y rapidez de la animación. |
 | **Foto redonda** | Círculo o cuadrado con esquinas redondeadas. |
 | **Color barra / Color acento** | Fondo de la barra (con transparencia) y color del anillo, la línea y las iniciales. El texto se pone blanco u oscuro según la barra. |
+| **Salir con otro clip** | Al disparar **otro clip** en Resolume, el zócalo **sale con su animación**. Si vuelves a disparar el mismo zócalo, repite la entrada. Necesita la salida OSC de Arena (ver abajo). |
+| **Puerto OSC** | Puerto por el que escucha a Arena (7001, el que Arena usa por defecto). |
+
+### Activar "Salir con otro clip" (una sola vez)
+Resolume no avisa a los plugins cuando disparas otro clip, pero sí puede avisar por **OSC** dentro del mismo computador:
+1. En Arena: **Arena → Preferences → OSC**.
+2. Activa **OSC Output**. Dirección **127.0.0.1**, puerto **7001**. Si la opción existe en tu versión, marca **Output all OSC messages**.
+3. Pon el zócalo **en su propia capa**. Al disparar un clip en otra capa, el zócalo sale animado. Si cambias de clip *en la misma capa*, Resolume corta el zócalo al instante, salvo que esa capa tenga un tiempo de **Transition**; con 1 segundo o más, la salida alcanza a verse.
+
+Si no sale, revisa `Documentos/Zocalo-log.txt`: debe decir "OSC: llegan mensajes de Resolume" y anotar los mensajes de clips que recibe.
 
 Idea de uso: una fila de clips con un zócalo por orador, cada uno con su foto y nombre, y los disparas con un clic o un Stream Deck.
 

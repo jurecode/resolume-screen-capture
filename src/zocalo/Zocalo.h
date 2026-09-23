@@ -54,6 +54,7 @@ private:
 	float BarLength() const;         //From the photo centre to the bar's far end, in pixels.
 	float Unit() const;              //One "design pixel" at the current output size and Tamano.
 	void StartPhase( Phase next );
+	void HandleClipTriggers();       //"Salir con otro clip": react to clips triggered in Resolume.
 	void RefreshTextures();          //Re-draws texts after they change, uploads a newly loaded photo.
 	void UploadBitmap( GLuint& texture, const Bitmap& bitmap );
 	void SyncUpdateUi( bool raiseEvents );
@@ -69,6 +70,8 @@ private:
 	float size           = 0.5f;
 	float speed          = 0.5f;
 	bool roundPhoto      = true;
+	bool exitOnOtherClip = true;
+	float oscPort        = 7001;//Resolume's default OSC output port.
 	float barHsba[ 4 ]    = { 0.625f, 0.75f, 0.20f, 0.92f };
 	float accentHsba[ 4 ] = { 0.112f, 0.85f, 1.00f, 1.00f };
 
@@ -79,6 +82,10 @@ private:
 	float shownSeconds = 0;     //Real seconds fully visible, for "Salir despues".
 	Clock::time_point lastFrame;
 	bool hasRendered = false;
+	Clock::time_point activatedAt;//When the clip last started being drawn.
+	uint64_t lastTriggerSeen = 0;//Newest OSC clip trigger already handled.
+	bool ownClipKnown = false;   //Which clip in Resolume is this one (learned from OSC).
+	int ownLayer = 0, ownClip = 0;
 	int movingFrom   = 0;       //Corner we're travelling away from.
 	float movingFromX = 0, movingFromY = 0;
 	float barLengthShown = 0;   //Eases towards BarLength() when the texts change.

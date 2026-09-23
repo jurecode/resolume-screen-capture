@@ -1,5 +1,6 @@
 #include "Zocalo.h"
 #include "../FileLog.h"
+#include "../OscListener.h"
 #include "../Updater.h"
 #include <algorithm>
 #include <atomic>
@@ -29,6 +30,8 @@ enum ParamType : FFUInt32
 	PT_ACCENT_SAT,
 	PT_ACCENT_BRI,
 	PT_ACCENT_ALPHA,
+	PT_EXIT_ON_OTHER,
+	PT_OSC_PORT,
 	PT_UPDATE_ACTION,
 	PT_UPDATE_LATER,
 	PT_UPDATE_SKIP,
@@ -72,6 +75,7 @@ const float EXIT_END    = 0.85f;
 const float MOVE_RETURN = 1.4f; //Moving: the bar starts unfolding again at the new corner.
 const float MOVE_END    = 2.35f;
 const float REACTIVATE_GAP = 0.4f;//Not drawn for this long: the clip was triggered again.
+const float OWN_TRIGGER_WINDOW = 0.5f;//A trigger this close to our start is our own clip's.
 
 int Margin( int fontPixels )
 {
@@ -309,6 +313,16 @@ Zocalo::Zocalo()
 	SetParamInfo( PT_ACCENT_BRI, "Color acento_Bri", FF_TYPE_BRIGHTNESS, accentHsba[ 2 ] );
 	SetParamInfo( PT_ACCENT_ALPHA, "Color acento_Alpha", FF_TYPE_ALPHA, accentHsba[ 3 ] );
 
+	SetParamInfo( PT_EXIT_ON_OTHER, "Salir con otro clip", FF_TYPE_BOOLEAN, exitOnOtherClip );
+	SetParamInfo( PT_OSC_PORT, "Puerto OSC", FF_TYPE_STANDARD, oscPort );
+	SetParamRange( PT_OSC_PORT, 1024.0f, 65535.0f );
+	//SetParamInfo clamps defaults to 0..1; ranged parameters need their real default back.
+	if( ParamInfo* info = FindParamInfo( PT_OSC_PORT ) )
+		info->defaultFloatVal = oscPort;
+	for( unsigned int param : { PT_EXIT_ON_OTHER, PT_OSC_PORT } )
+		SetParamGroup( param, "Salida automatica" );
+	osc::Listen( static_cast< int >( oscPort ) );
+
 	Updater::Get().Start();
 	SetParamInfof( PT_UPDATE_ACTION, "Actualizar plugin", FF_TYPE_EVENT );
 	SetParamInfof( PT_UPDATE_LATER, "Mas tarde", FF_TYPE_EVENT );
@@ -398,10 +412,13 @@ void Zocalo::Advance()
 	hasRendered = true;
 	if( reactivated )
 	{
-		elapsed = 0;
+		elapsed      = 0;
+		activatedAt  = now;
+		ownClipKnown = false;
 		if( autoEnter )
 			StartPhase( Phase::Entering );
 	}
+	HandleClipTriggers();
 	elapsed = std::min( elapsed, 0.1f );
 	phaseTime += elapsed * ( 0.4f + speed * 1.2f );
 
@@ -431,6 +448,46 @@ void Zocalo::Advance()
 	//When the name changes while visible, the bar stretches to fit instead of jumping.
 	float target   = BarLength();
 	barLengthShown = barLengthShown <= 0.0f ? target : barLengthShown + ( target - barLengthShown ) * std::min( 1.0f, elapsed * 10.0f );
+}
+
+void Zocalo::HandleClipTriggers()
+{
+	if( !exitOnOtherClip )
+	{
+		lastTriggerSeen = osc::LatestTriggerId();
+		return;
+	}
+	for( const osc::ClipTrigger& trigger : osc::TriggersSince( lastTriggerSeen ) )
+	{
+		lastTriggerSeen = trigger.id;
+		float sinceStart = std::chrono::duration< float >( trigger.time - activatedAt ).count();
+
+		//Resolume reports our own clip as it starts: remember which one it is.
+		if( std::abs( sinceStart ) <= OWN_TRIGGER_WINDOW )
+		{
+			if( trigger.layer >= 0 )
+			{
+				ownClipKnown = true;
+				ownLayer     = trigger.layer;
+				ownClip      = trigger.clip;
+			}
+			continue;
+		}
+		if( sinceStart < 0 )
+			continue;//Happened before this clip was started.
+
+		if( ownClipKnown && trigger.layer == ownLayer && trigger.clip == ownClip )
+		{
+			StartPhase( Phase::Entering );//Our own clip pressed again: play the entrance again.
+			continue;
+		}
+		if( phase == Phase::Entering || phase == Phase::Shown || phase == Phase::Moving )
+		{
+			Log( trigger.layer >= 0 ? "Se disparo el clip " + std::to_string( trigger.clip ) + " de la capa " + std::to_string( trigger.layer ) + ": salida animada"
+			                        : "Se disparo la columna " + std::to_string( trigger.clip ) + ": salida animada" );
+			StartPhase( Phase::Exiting );
+		}
+	}
 }
 
 Zocalo::Pose Zocalo::CurrentPose() const
@@ -691,6 +748,13 @@ FFResult Zocalo::SetFloatParameter( unsigned int index, float value )
 	case PT_ACCENT_ALPHA:
 		accentHsba[ index - PT_ACCENT_HUE ] = value;
 		break;
+	case PT_EXIT_ON_OTHER:
+		exitOnOtherClip = value > 0.5f;
+		break;
+	case PT_OSC_PORT:
+		oscPort = std::max( 1024.0f, std::min( std::round( value ), 65535.0f ) );
+		osc::Listen( static_cast< int >( oscPort ) );
+		break;
 	case PT_UPDATE_ACTION:
 		if( value != 0.0f )
 			Updater::Get().PressAction();
@@ -769,6 +833,10 @@ float Zocalo::GetFloatParameter( unsigned int index )
 		return speed;
 	case PT_ROUND_PHOTO:
 		return roundPhoto ? 1.0f : 0.0f;
+	case PT_EXIT_ON_OTHER:
+		return exitOnOtherClip ? 1.0f : 0.0f;
+	case PT_OSC_PORT:
+		return oscPort;
 	case PT_BAR_HUE:
 	case PT_BAR_SAT:
 	case PT_BAR_BRI:
@@ -813,6 +881,9 @@ char* Zocalo::GetParameterDisplay( unsigned int index )
 	case PT_SIZE:
 	case PT_SPEED:
 		snprintf( displayBuffer, sizeof( displayBuffer ), "%.0f%%", GetFloatParameter( index ) * 100.0f );
+		return displayBuffer;
+	case PT_OSC_PORT:
+		snprintf( displayBuffer, sizeof( displayBuffer ), "%.0f", oscPort );
 		return displayBuffer;
 	default:
 		return CFFGLPlugin::GetParameterDisplay( index );
