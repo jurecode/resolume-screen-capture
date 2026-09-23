@@ -1,5 +1,6 @@
 #include "../UpdateDialog.h"
 #include "../Updater.h"
+#include "../PluginIdentity.h"
 
 #import <AppKit/AppKit.h>
 
@@ -56,7 +57,7 @@ static CSUpdateWindowController* openController = nil;//Keeps the window alive w
 	                                     styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
 	                                       backing:NSBackingStoreBuffered
 	                                         defer:NO];
-	_window.title                = @"Captura Pantalla - Actualización";
+	_window.title                = @PLUGIN_DISPLAY_NAME " - Actualización";
 	_window.releasedWhenClosed   = NO;
 	_window.delegate             = self;
 	_window.hidesOnDeactivate    = NO;

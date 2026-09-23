@@ -1,5 +1,6 @@
 #include "../Platform.h"
 #include "../FileLog.h"
+#include "../PluginIdentity.h"
 
 #import <CommonCrypto/CommonDigest.h>
 #import <Foundation/Foundation.h>
@@ -52,14 +53,6 @@ int RunTool( const char* tool, std::vector< const char* > arguments )
 
 namespace platform
 {
-#ifdef SCREENCAPTURE_ARENA6
-//The Arena 6 plugin is a separate download that must keep updating to itself.
-const char* const UPDATE_URL_KEY    = "url_mac_arena6";
-const char* const UPDATE_SHA256_KEY = "sha256_mac_arena6";
-#else
-const char* const UPDATE_URL_KEY    = "url_mac";
-const char* const UPDATE_SHA256_KEY = "sha256_mac";
-#endif
 
 bool HttpsGet( const std::string& url, std::string& body, std::string& error )
 {
@@ -231,7 +224,7 @@ std::string LogFilePath()
 	@autoreleasepool
 	{
 		NSString* documents = NSSearchPathForDirectoriesInDomains( NSDocumentDirectory, NSUserDomainMask, YES ).firstObject;
-		return documents != nil ? std::string( [documents stringByAppendingPathComponent:@"CapturaPantalla-log.txt"].UTF8String ) : std::string();
+		return documents != nil ? std::string( [documents stringByAppendingPathComponent:@LOG_FILE_NAME].UTF8String ) : std::string();
 	}
 }
 

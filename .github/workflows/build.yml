@@ -20,8 +20,10 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ScreenCapture-win64
-          path: build/Release/ScreenCapture.dll
+          name: plugins-win64
+          path: |
+            build/Release/ScreenCapture.dll
+            build/Release/Zocalo.dll
 
   mac:
     runs-on: macos-15
@@ -36,16 +38,18 @@ jobs:
 
       - name: Sign bundles (ad-hoc) and zip
         run: |
-          for bundle in ScreenCapture ScreenCaptureArena6; do
+          for bundle in ScreenCapture ScreenCaptureArena6 Zocalo; do
             codesign --force --deep --sign - "build/$bundle.bundle"
             codesign --verify --strict "build/$bundle.bundle"
           done
           ditto -c -k --keepParent build/ScreenCapture.bundle ScreenCapture-mac.zip
           ditto -c -k --keepParent build/ScreenCaptureArena6.bundle ScreenCapture-mac-arena6.zip
+          ditto -c -k --keepParent build/Zocalo.bundle Zocalo-mac.zip
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ScreenCapture-mac
+          name: plugins-mac
           path: |
             ScreenCapture-mac.zip
             ScreenCapture-mac-arena6.zip
+            Zocalo-mac.zip

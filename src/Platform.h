@@ -16,9 +16,6 @@ void CleanupPreviousUpdate();//Removes what the last update left behind.
 // Replaces the installed plugin with the downloaded package (the dll on Windows, a zipped
 // bundle on macOS). The new version loads the next time Resolume starts. Returns an error or "".
 std::string InstallUpdate( const std::string& package );
-// Manifest fields holding this platform's download.
-extern const char* const UPDATE_URL_KEY;
-extern const char* const UPDATE_SHA256_KEY;
 
 // ---- Misc ----
 std::string LogFilePath();//UTF-8 path inside the user's Documents folder.

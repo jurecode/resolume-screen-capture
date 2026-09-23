@@ -1,6 +1,7 @@
 #include "../UpdateDialog.h"
 #include "../Platform.h"
 #include "../Updater.h"
+#include "../PluginIdentity.h"
 
 #include <windows.h>
 #include <atomic>
@@ -208,7 +209,8 @@ void RunDialog( std::wstring currentVersion, std::wstring newVersion, std::wstri
 	int x = ( monitor.rcWork.left + monitor.rcWork.right - windowWidth ) / 2;
 	int y = ( monitor.rcWork.top + monitor.rcWork.bottom - windowHeight ) / 2;
 
-	HWND window = CreateWindowExW( exStyle, CLASS_NAME, L"Captura Pantalla - Actualización", style, x, y, windowWidth,
+	std::wstring title = FromUtf8( PLUGIN_DISPLAY_NAME " - Actualización" );
+	HWND window = CreateWindowExW( exStyle, CLASS_NAME, title.c_str(), style, x, y, windowWidth,
 	                               windowHeight, nullptr, nullptr, ThisModule(), nullptr );
 	if( window != nullptr )
 	{

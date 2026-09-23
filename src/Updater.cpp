@@ -1,5 +1,6 @@
 #include "Updater.h"
 #include "Platform.h"
+#include "PluginIdentity.h"
 #include "UpdateDialog.h"
 
 #include <cctype>
@@ -157,9 +158,9 @@ struct Updater::Impl
 
 	bool IsPostponed( const std::string& version )
 	{
-		if( platform::ReadSetting( "SkipVersion" ) == version )
+		if( platform::ReadSetting( PLUGIN_SETTINGS_PREFIX "SkipVersion" ) == version )
 			return true;
-		std::string remindAfter = platform::ReadSetting( "RemindAfter" );
+		std::string remindAfter = platform::ReadSetting( PLUGIN_SETTINGS_PREFIX "RemindAfter" );
 		return !remindAfter.empty() && UnixNow() < atoll( remindAfter.c_str() );
 	}
 
@@ -204,7 +205,7 @@ struct Updater::Impl
 			error = "El manifiesto de actualizacion no tiene 'version'";
 		}
 		//An older release may only have been published for the other platform.
-		if( ok && JsonString( manifest, platform::UPDATE_URL_KEY ).empty() )
+		if( ok && JsonString( manifest, UPDATE_URL_FIELD ).empty() )
 			version = PLUGIN_VERSION_STRING;
 
 		bool alert      = false;
@@ -233,8 +234,8 @@ struct Updater::Impl
 			status.latestVersion = version;
 			status.notes         = JsonString( manifest, "notes" );
 			notes                = status.notes;
-			downloadUrl          = JsonString( manifest, platform::UPDATE_URL_KEY );
-			downloadSha256       = Lowercase( JsonString( manifest, platform::UPDATE_SHA256_KEY ) );
+			downloadUrl          = JsonString( manifest, UPDATE_URL_FIELD );
+			downloadSha256       = Lowercase( JsonString( manifest, UPDATE_SHA256_FIELD ) );
 			if( IsPostponed( version ) )
 			{
 				SetState( State::Postponed );
@@ -251,10 +252,10 @@ struct Updater::Impl
 		}
 		else if( alert )
 		{
-			std::string text = "Abre un clip de Captura Pantalla en Arena para instalarla.";
+			std::string text = "Abre un clip de " PLUGIN_DISPLAY_NAME " en Arena para instalarla.";
 			if( !notes.empty() )
 				text = notes.substr( 0, 180 ) + "\n" + text;
-			platform::ShowNotification( "Actualizacion disponible: v" + version, text );
+			platform::ShowNotification( std::string( PLUGIN_DISPLAY_NAME ": actualizacion v" ) + version, text );
 		}
 	}
 
@@ -283,7 +284,7 @@ struct Updater::Impl
 			status.error.clear();
 			SetState( State::Installed );
 		}
-		platform::ShowNotification( "v" + version + " instalada", "Reinicia Resolume Arena para usar la nueva version." );
+		platform::ShowNotification( std::string( PLUGIN_DISPLAY_NAME " v" ) + version + " instalada", "Reinicia Resolume Arena para usar la nueva version." );
 	}
 
 	// Returns an empty string on success.
@@ -362,7 +363,7 @@ void Updater::RemindLater()
 	if( impl->status.state != State::Available )
 		return;
 	auto later = UnixNow() + std::chrono::duration_cast< std::chrono::seconds >( REMIND_LATER ).count();
-	platform::WriteSetting( "RemindAfter", std::to_string( later ) );
+	platform::WriteSetting( PLUGIN_SETTINGS_PREFIX "RemindAfter", std::to_string( later ) );
 	impl->SetState( State::Postponed );
 }
 
@@ -373,6 +374,6 @@ void Updater::SkipVersion()
 	std::lock_guard< std::mutex > lock( impl->mutex );
 	if( impl->status.state != State::Available )
 		return;
-	platform::WriteSetting( "SkipVersion", impl->status.latestVersion );
+	platform::WriteSetting( PLUGIN_SETTINGS_PREFIX "SkipVersion", impl->status.latestVersion );
 	impl->SetState( State::Postponed );
 }

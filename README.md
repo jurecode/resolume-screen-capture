@@ -91,6 +91,25 @@ cmake -S . -B build -A x64 -DPLUGIN_VERSION=1.0.0 -DUPDATE_MANIFEST_URL=https://
 - Cada cuadro se copia de la GPU a la CPU y de vuelta a OpenGL. En 1080p va fluido. Para 4K a 60 fps se puede optimizar más adelante con `WGL_NV_DX_interop`, que evita la copia.
 - Los errores aparecen en el log de Resolume con el prefijo `[Captura Pantalla]`. Además, cada paso queda anotado en `Documentos\CapturaPantalla-log.txt`; si algo falla, envía ese archivo.
 
+## Zócalo (lower third animado)
+Segundo plugin del proyecto: **Zocalo**, en *Sources*. Presenta a una persona con **foto, nombre y subtítulo**, con una entrada animada: la foto aparece, la barra se despliega y los textos se deslizan. Tiene fondo transparente para ponerlo sobre la cámara o un video en otra capa.
+
+| Parámetro | Qué hace |
+|---|---|
+| **Foto** | Imagen de la persona (jpg, png, heic...). Se recorta sola al círculo. Sin foto muestra las **iniciales**. |
+| **Nombre / Subtitulo** | Los textos. Si los cambias con el zócalo visible, la barra se ajusta suavemente. |
+| **Posicion** | Abajo izquierda, abajo derecha, abajo centro, arriba izquierda, arriba derecha. Si lo cambias con el zócalo visible, **viaja animado** a la nueva esquina. |
+| **Entrar / Salir** | Botones para dispararlo en vivo. |
+| **Entrar al activar** | Entra solo cada vez que activas el clip. |
+| **Salir despues** | Sale solo después de N segundos (0 = nunca). |
+| **Tamano / Velocidad** | Escala del conjunto y rapidez de la animación. |
+| **Foto redonda** | Círculo o cuadrado con esquinas redondeadas. |
+| **Color barra / Color acento** | Fondo de la barra (con transparencia) y color del anillo, la línea y las iniciales. El texto se pone blanco u oscuro según la barra. |
+
+Idea de uso: una fila de clips con un zócalo por orador, cada uno con su foto y nombre, y los disparas con un clic o un Stream Deck.
+
+Archivos: `Zocalo.dll` (Windows) y `Zocalo-mac.zip` (Mac), en la misma página de Releases. Se instalan igual que Captura Pantalla y se actualizan solos. Su registro está en `Documentos/Zocalo-log.txt`.
+
 ## Estructura
 ```
 src/ScreenCapture.*    Plugin FFGL: parámetros, shader y dibujo (común)
@@ -101,6 +120,8 @@ src/Platform.h         Lo que cada sistema aporta: descargas, ajustes, instalar
 src/win/               Windows: Windows Graphics Capture, WinHTTP, ventana Win32
 src/mac/               Mac: ScreenCaptureKit, NSURLSession, ventana AppKit
 src/arena6/            Plugin para Arena 6 (FFGL 1.6), reutiliza la captura de Mac
+src/zocalo/            Plugin Zócalo: animación, diseño (shader) e icono
+src/Drawing.h          Texto y fotos: GDI + WIC (Windows), CoreText + ImageIO (Mac)
 .github/workflows/     build.yml (compilación de prueba) y release.yml (publica Windows + Mac)
 third_party/ffgl       SDK FFGL oficial de Resolume (github.com/resolume/ffgl)
 third_party/glew-2.1.0 GLEW, que usa el SDK en Windows

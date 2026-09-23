@@ -1,4 +1,5 @@
 #include "../Platform.h"
+#include "../PluginIdentity.h"
 
 #include <windows.h>
 #include <bcrypt.h>
@@ -65,9 +66,6 @@ struct InternetHandle
 
 namespace platform
 {
-const char* const UPDATE_URL_KEY    = "url";
-const char* const UPDATE_SHA256_KEY = "sha256";
-
 // HTTPS download with WinHTTP (built into Windows, follows GitHub's redirects).
 bool HttpsGet( const std::string& url, std::string& body, std::string& error )
 {
@@ -206,7 +204,7 @@ void ShowNotification( const std::string& title, const std::string& text )
 		icon.uFlags      = NIF_ICON | NIF_TIP | NIF_INFO;
 		icon.hIcon       = LoadIconW( nullptr, MAKEINTRESOURCEW( 32516 ) );//IDI_INFORMATION
 		icon.dwInfoFlags = NIIF_INFO;
-		wcsncpy_s( icon.szTip, L"Captura Pantalla (Resolume)", _TRUNCATE );
+		wcsncpy_s( icon.szTip, FromUtf8( PLUGIN_DISPLAY_NAME " (Resolume)" ).c_str(), _TRUNCATE );
 		wcsncpy_s( icon.szInfoTitle, FromUtf8( title ).c_str(), _TRUNCATE );
 		wcsncpy_s( icon.szInfo, FromUtf8( text ).c_str(), _TRUNCATE );
 		Shell_NotifyIconW( NIM_ADD, &icon );
@@ -279,7 +277,7 @@ std::string LogFilePath()
 	PWSTR documents = nullptr;
 	if( FAILED( SHGetKnownFolderPath( FOLDERID_Documents, 0, nullptr, &documents ) ) )
 		return {};
-	std::wstring path = std::wstring( documents ) + L"\\CapturaPantalla-log.txt";
+	std::wstring path = std::wstring( documents ) + L"\\" + FromUtf8( LOG_FILE_NAME );
 	CoTaskMemFree( documents );
 	return ToUtf8( path );
 }
