@@ -1,12 +1,16 @@
 #include "WgcCapture.h"
+#include "FileLog.h"
 
 #include <unknwn.h>
 #include <inspectable.h>
 #include <d3d11.h>
 #include <dxgi.h>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <mutex>
+#include <vector>
 
 #include <winrt/base.h>
 #include <winrt/Windows.Foundation.h>
@@ -29,16 +33,28 @@ namespace
 {
 const wgd::DirectXPixelFormat PIXEL_FORMAT = wgd::DirectXPixelFormat::B8G8R8A8UIntNormalized;
 const int FRAME_BUFFERS                    = 2;
+const DWORD IDLE_WAKE_MS                   = 100;
+const DWORD SHUTDOWN_WAIT_MS               = 3000;
 
-// Resolume owns its threads, so we can't call CoInitializeEx on them without risking
-// breaking the host's own COM usage. Keeping the process-wide MTA alive instead lets any
-// thread without an apartment make WinRT calls.
+// Lets threads we don't own (Resolume's) make WinRT calls without initializing COM on them.
 void EnsureWinRTUsable()
 {
 	static std::once_flag once;
 	std::call_once( once, [] {
 		CO_MTA_USAGE_COOKIE cookie{};
 		CoIncrementMTAUsage( &cookie );//Intentionally never released.
+	} );
+}
+
+// A capture thread may outlive its plugin instance if Windows is slow to stop, so the dll must
+// never be unloaded underneath it.
+void PinThisModule()
+{
+	static std::once_flag once;
+	std::call_once( once, [] {
+		HMODULE module = nullptr;
+		GetModuleHandleExW( GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+		                    reinterpret_cast< LPCWSTR >( &PinThisModule ), &module );
 	} );
 }
 
@@ -71,30 +87,132 @@ std::string Describe( const winrt::hresult_error& error )
 	snprintf( code, sizeof( code ), "0x%08X", static_cast< unsigned int >( error.code() ) );
 	return std::string( code ) + " " + winrt::to_string( error.message() );
 }
+
+enum class Phase
+{
+	Idle,
+	Starting,
+	Running,
+	Closed,
+	Failed,
+};
 }// namespace
 
 struct WgcCapture::Impl
 {
+	// ---- Shared between the render thread and the capture thread (guarded by mutex) ----
+	std::mutex mutex;
+	CaptureTarget wantedTarget;
+	bool wantedCursor         = true;
+	uint64_t wantedGeneration = 0;//Bumped by every Start/Stop.
+	bool quit                 = false;
+
+	std::vector< unsigned char > readyPixels;//Newest finished frame.
+	int readyWidth            = 0;
+	int readyHeight           = 0;
+	uint64_t readyGeneration  = 0;
+	bool readyIsNew           = false;
+	std::string error;
+
+	std::atomic< Phase > phase{ Phase::Idle };
+	std::atomic< bool > itemClosed{ false };
+	HANDLE wakeEvent = CreateEventW( nullptr, FALSE, FALSE, nullptr );
+	HANDLE doneEvent = CreateEventW( nullptr, TRUE, FALSE, nullptr );
+
+	// ---- Render thread only ----
+	std::vector< unsigned char > frontPixels;
+
+	// ---- Capture thread only ----
 	winrt::com_ptr< ID3D11Device > d3dDevice;
 	winrt::com_ptr< ID3D11DeviceContext > d3dContext;
 	wgd3d::IDirect3DDevice device{ nullptr };
-
 	wgc::GraphicsCaptureItem item{ nullptr };
 	wgc::Direct3D11CaptureFramePool framePool{ nullptr };
 	wgc::GraphicsCaptureSession session{ nullptr };
 	wgc::GraphicsCaptureItem::Closed_revoker closedRevoker;
+	wgc::Direct3D11CaptureFramePool::FrameArrived_revoker frameArrivedRevoker;
 	wg::SizeInt32 poolSize{};
-	std::atomic< bool > closed{ false };
+	uint64_t activeGeneration = 0;
+	bool activeCursor         = true;
+	std::string activeLabel;
+	std::chrono::steady_clock::time_point startTime;
+	bool gotFirstFrame = false;
 
-	//CPU readable copy of the last frame. Copied into on one Poll, read on the next.
 	winrt::com_ptr< ID3D11Texture2D > staging;
 	UINT stagingWidth  = 0;
 	UINT stagingHeight = 0;
-	bool copyPending   = false;
-	UINT pendingWidth  = 0;
-	UINT pendingHeight = 0;
+	std::vector< unsigned char > workPixels;
 
-	std::string lastError;
+	~Impl()
+	{
+		CloseHandle( wakeEvent );
+		CloseHandle( doneEvent );
+	}
+
+	void Fail( const std::string& message )
+	{
+		LogToFile( "ERROR " + activeLabel + ": " + message );
+		{
+			std::lock_guard< std::mutex > lock( mutex );
+			error = "No se pudo capturar " + activeLabel + ": " + message;
+		}
+		phase = Phase::Failed;
+	}
+
+	void Run()
+	{
+		try
+		{
+			winrt::init_apartment( winrt::apartment_type::multi_threaded );
+		}
+		catch( ... )
+		{
+		}
+
+		for( ;; )
+		{
+			WaitForSingleObject( wakeEvent, IDLE_WAKE_MS );
+
+			CaptureTarget target;
+			bool cursor;
+			uint64_t generation;
+			{
+				std::lock_guard< std::mutex > lock( mutex );
+				if( quit )
+					break;
+				target     = wantedTarget;
+				cursor     = wantedCursor;
+				generation = wantedGeneration;
+			}
+
+			if( generation != activeGeneration )
+			{
+				activeGeneration = generation;
+				Close();
+				if( target.kind == CaptureTarget::Kind::None )
+					phase = Phase::Idle;
+				else
+					Open( target, cursor );
+			}
+			else if( session && cursor != activeCursor )
+			{
+				ApplyCursor( cursor );
+			}
+
+			if( session && itemClosed )
+			{
+				LogToFile( "La fuente se cerro: " + activeLabel );
+				Close();
+				phase = Phase::Closed;
+			}
+
+			if( session )
+				ReadNewestFrame();
+		}
+
+		Close();
+		SetEvent( doneEvent );
+	}
 
 	bool EnsureDevice()
 	{
@@ -105,7 +223,7 @@ struct WgcCapture::Impl
 		                                    nullptr, 0, D3D11_SDK_VERSION, d3dDevice.put(), nullptr, d3dContext.put() );
 		if( FAILED( result ) )
 		{
-			lastError = "No se pudo crear el dispositivo Direct3D 11";
+			Fail( "no se pudo crear el dispositivo Direct3D 11" );
 			return false;
 		}
 
@@ -114,6 +232,118 @@ struct WgcCapture::Impl
 		winrt::check_hresult( CreateDirect3D11DeviceFromDXGIDevice( dxgiDevice.get(), inspectable.put() ) );
 		device = inspectable.as< wgd3d::IDirect3DDevice >();
 		return true;
+	}
+
+	void Open( const CaptureTarget& target, bool cursor )
+	{
+		activeLabel   = target.label;
+		gotFirstFrame = false;
+		startTime     = std::chrono::steady_clock::now();
+		phase         = Phase::Starting;
+		LogToFile( "Iniciando captura: " + activeLabel );
+
+		if( !IsTargetAlive( target ) )
+		{
+			Fail( "la ventana o pantalla ya no existe (pulsa 'Actualizar lista')" );
+			return;
+		}
+
+		try
+		{
+			if( !EnsureDevice() )
+				return;
+
+			auto interop = winrt::get_activation_factory< wgc::GraphicsCaptureItem, IGraphicsCaptureItemInterop >();
+			wgc::GraphicsCaptureItem newItem{ nullptr };
+			if( target.kind == CaptureTarget::Kind::Window )
+				winrt::check_hresult( interop->CreateForWindow( target.window, winrt::guid_of< wgc::IGraphicsCaptureItem >(), winrt::put_abi( newItem ) ) );
+			else
+				winrt::check_hresult( interop->CreateForMonitor( target.monitor, winrt::guid_of< wgc::IGraphicsCaptureItem >(), winrt::put_abi( newItem ) ) );
+
+			item       = newItem;
+			poolSize   = AtLeastOnePixel( item.Size() );
+			framePool  = wgc::Direct3D11CaptureFramePool::CreateFreeThreaded( device, PIXEL_FORMAT, FRAME_BUFFERS, poolSize );
+			session    = framePool.CreateCaptureSession( item );
+			itemClosed = false;
+
+			HANDLE wake         = wakeEvent;
+			std::atomic< bool >* closedFlag = &itemClosed;
+			closedRevoker       = item.Closed( winrt::auto_revoke, [ closedFlag, wake ]( auto&&, auto&& ) {
+                *closedFlag = true;
+                SetEvent( wake );
+            } );
+			frameArrivedRevoker = framePool.FrameArrived( winrt::auto_revoke, [ wake ]( auto&&, auto&& ) { SetEvent( wake ); } );
+
+			activeCursor = !cursor;//Force ApplyCursor to set it.
+			ApplyCursor( cursor );
+
+#if defined( NTDDI_WIN10_FE )
+			//Windows 11 lets us hide the yellow "being captured" border, which would otherwise
+			//end up on the projector. Older systems simply keep the border.
+			static const bool canHideBorder = SessionHasProperty( L"IsBorderRequired" );
+			if( canHideBorder )
+			{
+				try
+				{
+					session.IsBorderRequired( false );
+				}
+				catch( ... )
+				{
+				}
+			}
+#endif
+
+			session.StartCapture();
+			LogToFile( "Captura iniciada (" + std::to_string( poolSize.Width ) + "x" + std::to_string( poolSize.Height ) + "), esperando la primera imagen" );
+		}
+		catch( const winrt::hresult_error& e )
+		{
+			Close();
+			Fail( Describe( e ) );
+		}
+		catch( const std::exception& e )
+		{
+			Close();
+			Fail( e.what() );
+		}
+	}
+
+	void Close()
+	{
+		frameArrivedRevoker.revoke();
+		closedRevoker.revoke();
+		try
+		{
+			if( session )
+				session.Close();
+			if( framePool )
+				framePool.Close();
+		}
+		catch( ... )
+		{
+		}
+		session   = nullptr;
+		framePool = nullptr;
+		item      = nullptr;
+	}
+
+	void ApplyCursor( bool cursor )
+	{
+		if( cursor == activeCursor )
+			return;
+		activeCursor = cursor;
+#if defined( NTDDI_WIN10_VB )
+		static const bool canToggleCursor = SessionHasProperty( L"IsCursorCaptureEnabled" );
+		if( !session || !canToggleCursor )
+			return;
+		try
+		{
+			session.IsCursorCaptureEnabled( cursor );
+		}
+		catch( ... )
+		{
+		}
+#endif
 	}
 
 	void EnsureStaging( UINT width, UINT height )
@@ -136,16 +366,110 @@ struct WgcCapture::Impl
 		stagingWidth  = width;
 		stagingHeight = height;
 	}
+
+	void ReadNewestFrame()
+	{
+		try
+		{
+			//Windows only sends frames when something changes; keep just the newest one.
+			wgc::Direct3D11CaptureFrame frame{ nullptr };
+			while( auto next = framePool.TryGetNextFrame() )
+			{
+				if( frame )
+					frame.Close();
+				frame = next;
+			}
+			if( !frame )
+				return;
+
+			wg::SizeInt32 contentSize = frame.ContentSize();
+			winrt::com_ptr< ID3D11Texture2D > texture;
+			auto access = frame.Surface().as< IDirect3DDxgiInterfaceAccess >();
+			winrt::check_hresult( access->GetInterface( __uuidof( ID3D11Texture2D ), texture.put_void() ) );
+
+			D3D11_TEXTURE2D_DESC desc{};
+			texture->GetDesc( &desc );
+			UINT width  = contentSize.Width > 0 ? static_cast< UINT >( contentSize.Width ) : 0;
+			UINT height = contentSize.Height > 0 ? static_cast< UINT >( contentSize.Height ) : 0;
+			width       = width < desc.Width ? width : desc.Width;
+			height      = height < desc.Height ? height : desc.Height;
+
+			if( width > 0 && height > 0 )
+			{
+				EnsureStaging( width, height );
+				D3D11_BOX box{ 0, 0, 0, width, height, 1 };
+				d3dContext->CopySubresourceRegion( staging.get(), 0, 0, 0, 0, texture.get(), 0, &box );
+
+				//This waits for the GPU copy, which is fine here: we're not on Resolume's thread.
+				D3D11_MAPPED_SUBRESOURCE mapped{};
+				winrt::check_hresult( d3dContext->Map( staging.get(), 0, D3D11_MAP_READ, 0, &mapped ) );
+				size_t rowBytes = static_cast< size_t >( width ) * 4;
+				workPixels.resize( rowBytes * height );
+				for( UINT row = 0; row < height; ++row )
+					memcpy( workPixels.data() + row * rowBytes, static_cast< const unsigned char* >( mapped.pData ) + row * mapped.RowPitch, rowBytes );
+				d3dContext->Unmap( staging.get(), 0 );
+
+				{
+					std::lock_guard< std::mutex > lock( mutex );
+					readyPixels.swap( workPixels );
+					readyWidth      = static_cast< int >( width );
+					readyHeight     = static_cast< int >( height );
+					readyGeneration = activeGeneration;
+					readyIsNew      = true;
+				}
+				phase = Phase::Running;
+
+				if( !gotFirstFrame )
+				{
+					gotFirstFrame = true;
+					auto elapsed  = std::chrono::duration_cast< std::chrono::milliseconds >( std::chrono::steady_clock::now() - startTime ).count();
+					LogToFile( "Primera imagen recibida: " + std::to_string( width ) + "x" + std::to_string( height ) + " en " + std::to_string( elapsed ) + " ms" );
+				}
+			}
+			frame.Close();
+
+			//The window was resized: let Windows allocate buffers of the new size.
+			wg::SizeInt32 newSize = AtLeastOnePixel( contentSize );
+			if( newSize.Width != poolSize.Width || newSize.Height != poolSize.Height )
+			{
+				poolSize = newSize;
+				framePool.Recreate( device, PIXEL_FORMAT, FRAME_BUFFERS, newSize );
+			}
+		}
+		catch( const winrt::hresult_error& e )
+		{
+			Close();
+			Fail( Describe( e ) );
+		}
+	}
 };
 
 WgcCapture::WgcCapture() :
-	impl( std::make_unique< Impl >() )
+	impl( std::make_shared< Impl >() )
 {
+	PinThisModule();
+	std::shared_ptr< Impl > state = impl;
+	worker                        = std::thread( [ state ] { state->Run(); } );
 }
 
 WgcCapture::~WgcCapture()
 {
-	Stop();
+	{
+		std::lock_guard< std::mutex > lock( impl->mutex );
+		impl->quit = true;
+	}
+	SetEvent( impl->wakeEvent );
+
+	//If Windows is stuck we'd rather leave the thread behind than freeze Resolume.
+	if( WaitForSingleObject( impl->doneEvent, SHUTDOWN_WAIT_MS ) == WAIT_OBJECT_0 )
+	{
+		worker.join();
+	}
+	else
+	{
+		LogToFile( "El hilo de captura no se detuvo a tiempo; se deja terminar solo" );
+		worker.detach();
+	}
 }
 
 bool WgcCapture::IsSupported()
@@ -161,197 +485,71 @@ bool WgcCapture::IsSupported()
 	}
 }
 
-bool WgcCapture::Start( const CaptureTarget& target, bool showCursor )
+void WgcCapture::Start( const CaptureTarget& target, bool showCursor )
 {
-	Stop();
-	EnsureWinRTUsable();
-
-	if( target.kind == CaptureTarget::Kind::None )
-		return false;
-
-	try
 	{
-		if( !impl->EnsureDevice() )
-			return false;
-
-		auto interop = winrt::get_activation_factory< wgc::GraphicsCaptureItem, IGraphicsCaptureItemInterop >();
-		wgc::GraphicsCaptureItem item{ nullptr };
-		if( target.kind == CaptureTarget::Kind::Window )
-			winrt::check_hresult( interop->CreateForWindow( target.window, winrt::guid_of< wgc::IGraphicsCaptureItem >(), winrt::put_abi( item ) ) );
-		else
-			winrt::check_hresult( interop->CreateForMonitor( target.monitor, winrt::guid_of< wgc::IGraphicsCaptureItem >(), winrt::put_abi( item ) ) );
-
-		impl->item      = item;
-		impl->poolSize  = AtLeastOnePixel( item.Size() );
-		impl->framePool = wgc::Direct3D11CaptureFramePool::CreateFreeThreaded( impl->device, PIXEL_FORMAT, FRAME_BUFFERS, impl->poolSize );
-		impl->session   = impl->framePool.CreateCaptureSession( item );
-
-		impl->closed        = false;
-		Impl* state         = impl.get();
-		impl->closedRevoker = item.Closed( winrt::auto_revoke, [ state ]( auto&&, auto&& ) { state->closed = true; } );
-
-		SetCursorVisible( showCursor );
-
-#if defined( NTDDI_WIN10_FE )
-		//Windows 11 lets us hide the yellow "being captured" border, which would otherwise
-		//end up on the projector. Older systems simply keep the border.
-		static const bool canHideBorder = SessionHasProperty( L"IsBorderRequired" );
-		if( canHideBorder )
-		{
-			try
-			{
-				impl->session.IsBorderRequired( false );
-			}
-			catch( ... )
-			{
-			}
-		}
-#endif
-
-		impl->session.StartCapture();
-		impl->lastError.clear();
-		return true;
+		std::lock_guard< std::mutex > lock( impl->mutex );
+		impl->wantedTarget = target;
+		impl->wantedCursor = showCursor;
+		++impl->wantedGeneration;
+		impl->error.clear();
 	}
-	catch( const winrt::hresult_error& error )
-	{
-		impl->lastError = Describe( error );
-	}
-	catch( const std::exception& error )
-	{
-		impl->lastError = error.what();
-	}
-
-	Stop();
-	return false;
+	impl->phase = target.kind == CaptureTarget::Kind::None ? Phase::Idle : Phase::Starting;
+	SetEvent( impl->wakeEvent );
 }
 
 void WgcCapture::Stop()
 {
-	impl->closedRevoker.revoke();
-	try
 	{
-		if( impl->session )
-			impl->session.Close();
-		if( impl->framePool )
-			impl->framePool.Close();
+		std::lock_guard< std::mutex > lock( impl->mutex );
+		impl->wantedTarget = CaptureTarget();
+		++impl->wantedGeneration;
 	}
-	catch( ... )
-	{
-	}
-	impl->session     = nullptr;
-	impl->framePool   = nullptr;
-	impl->item        = nullptr;
-	impl->copyPending = false;
-}
-
-bool WgcCapture::IsActive() const
-{
-	return impl->session != nullptr;
-}
-
-bool WgcCapture::WasClosed() const
-{
-	return impl->closed;
+	impl->phase = Phase::Idle;
+	SetEvent( impl->wakeEvent );
 }
 
 void WgcCapture::SetCursorVisible( bool visible )
 {
-#if defined( NTDDI_WIN10_VB )
-	static const bool canToggleCursor = SessionHasProperty( L"IsCursorCaptureEnabled" );
-	if( !impl->session || !canToggleCursor )
-		return;
-	try
 	{
-		impl->session.IsCursorCaptureEnabled( visible );
+		std::lock_guard< std::mutex > lock( impl->mutex );
+		impl->wantedCursor = visible;
 	}
-	catch( ... )
-	{
-	}
-#else
-	(void)visible;
-#endif
+	SetEvent( impl->wakeEvent );
 }
 
-bool WgcCapture::Poll( const FrameCallback& onFrame )
+bool WgcCapture::IsActive() const
 {
-	if( !impl->framePool )
-		return false;
-
-	bool delivered = false;
-	try
-	{
-		//1. Hand over the frame we asked the GPU to copy on the previous call. That copy has
-		//   had a whole render tick to finish, so Map() normally returns without waiting.
-		if( impl->copyPending )
-		{
-			impl->copyPending = false;
-			D3D11_MAPPED_SUBRESOURCE mapped{};
-			if( SUCCEEDED( impl->d3dContext->Map( impl->staging.get(), 0, D3D11_MAP_READ, 0, &mapped ) ) )
-			{
-				onFrame( static_cast< const unsigned char* >( mapped.pData ),
-				         static_cast< int >( impl->pendingWidth ),
-				         static_cast< int >( impl->pendingHeight ),
-				         static_cast< int >( mapped.RowPitch ) );
-				impl->d3dContext->Unmap( impl->staging.get(), 0 );
-				delivered = true;
-			}
-		}
-
-		//2. Take the newest frame Windows produced and drop any older ones. Windows only sends
-		//   frames when something changes, so a still slide may produce none for a long time.
-		wgc::Direct3D11CaptureFrame frame{ nullptr };
-		while( auto next = impl->framePool.TryGetNextFrame() )
-		{
-			if( frame )
-				frame.Close();
-			frame = next;
-		}
-		if( !frame )
-			return delivered;
-
-		wg::SizeInt32 contentSize = frame.ContentSize();
-
-		winrt::com_ptr< ID3D11Texture2D > texture;
-		auto access = frame.Surface().as< IDirect3DDxgiInterfaceAccess >();
-		winrt::check_hresult( access->GetInterface( __uuidof( ID3D11Texture2D ), texture.put_void() ) );
-
-		D3D11_TEXTURE2D_DESC desc{};
-		texture->GetDesc( &desc );
-		UINT width  = contentSize.Width > 0 ? static_cast< UINT >( contentSize.Width ) : 0;
-		UINT height = contentSize.Height > 0 ? static_cast< UINT >( contentSize.Height ) : 0;
-		width       = width < desc.Width ? width : desc.Width;
-		height      = height < desc.Height ? height : desc.Height;
-
-		if( width > 0 && height > 0 )
-		{
-			impl->EnsureStaging( width, height );
-			D3D11_BOX box{ 0, 0, 0, width, height, 1 };
-			impl->d3dContext->CopySubresourceRegion( impl->staging.get(), 0, 0, 0, 0, texture.get(), 0, &box );
-			impl->d3dContext->Flush();
-			impl->copyPending   = true;
-			impl->pendingWidth  = width;
-			impl->pendingHeight = height;
-		}
-		frame.Close();
-
-		//The window was resized: let Windows allocate buffers of the new size.
-		wg::SizeInt32 newSize = AtLeastOnePixel( contentSize );
-		if( newSize.Width != impl->poolSize.Width || newSize.Height != impl->poolSize.Height )
-		{
-			impl->poolSize = newSize;
-			impl->framePool.Recreate( impl->device, PIXEL_FORMAT, FRAME_BUFFERS, newSize );
-		}
-	}
-	catch( const winrt::hresult_error& error )
-	{
-		impl->lastError = Describe( error );
-		Stop();
-	}
-
-	return delivered;
+	Phase phase = impl->phase;
+	return phase == Phase::Starting || phase == Phase::Running;
 }
 
-const std::string& WgcCapture::GetLastError() const
+bool WgcCapture::WasClosed() const
 {
-	return impl->lastError;
+	return impl->phase == Phase::Closed;
+}
+
+bool WgcCapture::TakeFrame( const FrameCallback& onFrame )
+{
+	int width, height;
+	{
+		std::lock_guard< std::mutex > lock( impl->mutex );
+		//Ignore frames that still belong to the previous source.
+		if( !impl->readyIsNew || impl->readyGeneration != impl->wantedGeneration )
+			return false;
+		impl->frontPixels.swap( impl->readyPixels );
+		width            = impl->readyWidth;
+		height           = impl->readyHeight;
+		impl->readyIsNew = false;
+	}
+	onFrame( impl->frontPixels.data(), width, height );
+	return true;
+}
+
+std::string WgcCapture::TakeError()
+{
+	std::lock_guard< std::mutex > lock( impl->mutex );
+	std::string error;
+	error.swap( impl->error );
+	return error;
 }

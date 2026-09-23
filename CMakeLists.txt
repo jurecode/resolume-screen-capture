@@ -34,6 +34,8 @@ add_library(ScreenCapture MODULE
     src/WgcCapture.cpp
     src/WgcCapture.h
     src/Updater.cpp
+    src/FileLog.cpp
+    src/FileLog.h
     src/Updater.h
     ${FFGL_DIR}/FFGLSDK.cpp
 )

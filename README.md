@@ -66,8 +66,9 @@ cmake -S . -B build -A x64 -DPLUGIN_VERSION=1.0.0 -DUPDATE_MANIFEST_URL=https://
 - **Las ventanas minimizadas no se capturan.** Windows no las dibuja, así que la imagen se queda en negro o transparente. Déjalas abiertas, aunque estén detrás de otras ventanas.
 - En la lista, la ventana se guarda por posición. Al reabrir una composición puede apuntar a otra ventana, por eso conviene usar **Buscar ventana**.
 - En Windows 10 aparece un **borde amarillo** alrededor de lo que se captura. Windows 11 permite ocultarlo y el plugin lo hace automáticamente.
-- En esta primera versión, cada cuadro se copia de la GPU a la CPU y de vuelta a OpenGL. En 1080p va fluido. Para 4K a 60 fps se puede optimizar más adelante con `WGL_NV_DX_interop`, que evita la copia.
-- Los errores aparecen en el log de Resolume con el prefijo `[Captura Pantalla]`.
+- La captura corre en un hilo propio, así que Arena nunca espera a Windows al cambiar de fuente.
+- Cada cuadro se copia de la GPU a la CPU y de vuelta a OpenGL. En 1080p va fluido. Para 4K a 60 fps se puede optimizar más adelante con `WGL_NV_DX_interop`, que evita la copia.
+- Los errores aparecen en el log de Resolume con el prefijo `[Captura Pantalla]`. Además, cada paso queda anotado en `Documentos\CapturaPantalla-log.txt`; si algo falla, envía ese archivo.
 
 ## Estructura
 ```

@@ -3,16 +3,18 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <thread>
 
 // Captures a monitor or a window with Windows.Graphics.Capture (Windows 10 1903 or newer).
-// Frames are read back to the CPU so they can be uploaded into Resolume's OpenGL context.
-// Every method must be called from the same thread (Resolume's render thread).
+//
+// All the capture work (WinRT, Direct3D, copying frames from the GPU) runs on a private thread.
+// Resolume's render thread never waits on Windows: Start/Stop return immediately and
+// TakeFrame only picks up the newest frame that is already finished.
 class WgcCapture
 {
 public:
-	// bgra points at `height` rows of `width` BGRA pixels, each row `rowPitch` bytes apart.
-	// The pointer is only valid during the callback.
-	using FrameCallback = std::function< void( const unsigned char* bgra, int width, int height, int rowPitch ) >;
+	// bgra points at `height` tightly packed rows of `width` BGRA pixels, valid during the callback.
+	using FrameCallback = std::function< void( const unsigned char* bgra, int width, int height ) >;
 
 	WgcCapture();
 	~WgcCapture();
@@ -21,19 +23,21 @@ public:
 
 	static bool IsSupported();
 
-	bool Start( const CaptureTarget& target, bool showCursor );
+	void Start( const CaptureTarget& target, bool showCursor );
 	void Stop();
-	bool IsActive() const;
-	bool WasClosed() const;//The captured window was closed or the monitor was disconnected.
 	void SetCursorVisible( bool visible );
 
-	// Delivers at most one frame through onFrame. Returns true when it did.
-	// Frames arrive one render tick after Windows produces them so we never stall the GPU.
-	bool Poll( const FrameCallback& onFrame );
+	bool IsActive() const; //Starting or capturing.
+	bool WasClosed() const;//The captured window was closed or the monitor was disconnected.
 
-	const std::string& GetLastError() const;
+	// Calls onFrame with the newest frame of the current target, if one arrived since the last call.
+	bool TakeFrame( const FrameCallback& onFrame );
+
+	// Returns the last error (and clears it), or an empty string.
+	std::string TakeError();
 
 private:
 	struct Impl;
-	std::unique_ptr< Impl > impl;
+	std::shared_ptr< Impl > impl;
+	std::thread worker;
 };

@@ -26,7 +26,7 @@ private:
 	void Select( int index, bool notifyHost );
 	bool ApplySearch( bool forceRestart ); //Selects the first target matching searchText.
 	void StartSelectedCapture();
-	void UploadFrame( const unsigned char* bgra, int width, int height, int rowPitch );
+	void UploadFrame( const unsigned char* bgra, int width, int height );
 	void SyncUpdateUi( bool raiseEvents );//Mirrors the shared Updater state into the "Actualizacion" buttons.
 	void Log( const std::string& message );
 
@@ -43,6 +43,7 @@ private:
 	WgcCapture capture;
 	std::chrono::steady_clock::time_point lastSearchRetry;
 	uint32_t shownUpdateRevision = UINT32_MAX;
+	std::string lastCaptureError;
 
 	GLuint texture = 0;
 	int textureWidth  = 0;

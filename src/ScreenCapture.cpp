@@ -1,7 +1,9 @@
 #include "ScreenCapture.h"
+#include "FileLog.h"
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <mutex>
 using namespace ffglex;
 
 enum ParamType : FFUInt32
@@ -142,6 +144,9 @@ FFResult ScreenCapture::InitGL( const FFGLViewportStruct* vp )
 		return FF_FAIL;
 	}
 
+	static std::once_flag logVersionOnce;
+	std::call_once( logVersionOnce, [] { LogToFile( "Captura Pantalla v" PLUGIN_VERSION_STRING " cargado" ); } );
+
 	glGenTextures( 1, &texture );
 	{
 		Scoped2DTextureBinding textureBinding( texture );
@@ -181,12 +186,18 @@ FFResult ScreenCapture::ProcessOpenGL( ProcessOpenGLStruct* pGL )
 		StartSelectedCapture();
 	}
 
-	if( capture.IsActive() && capture.WasClosed() )
+	if( capture.WasClosed() )
 	{
 		Log( "La fuente se cerro: " + selected.label );
 		capture.Stop();
 		hasFrame = false;
 	}
+
+	std::string error = capture.TakeError();
+	if( !error.empty() && error != lastCaptureError )
+		Log( error );//The search retry can hit the same error every 2 seconds, log it once.
+	if( !error.empty() )
+		lastCaptureError = error;
 
 	//"Buscar ventana" keeps looking, so the capture comes back by itself when the
 	//presentation / browser window is opened again.
@@ -202,8 +213,8 @@ FFResult ScreenCapture::ProcessOpenGL( ProcessOpenGLStruct* pGL )
 		}
 	}
 
-	capture.Poll( [ this ]( const unsigned char* bgra, int width, int height, int rowPitch ) {
-		UploadFrame( bgra, width, height, rowPitch );
+	capture.TakeFrame( [ this ]( const unsigned char* bgra, int width, int height ) {
+		UploadFrame( bgra, width, height );
 	} );
 
 	float x0 = crop[ 0 ] * MAX_CROP;
@@ -237,7 +248,7 @@ FFResult ScreenCapture::ProcessOpenGL( ProcessOpenGLStruct* pGL )
 	return FF_SUCCESS;
 }
 
-void ScreenCapture::UploadFrame( const unsigned char* bgra, int width, int height, int rowPitch )
+void ScreenCapture::UploadFrame( const unsigned char* bgra, int width, int height )
 {
 	Scoped2DTextureBinding textureBinding( texture );
 	if( width != textureWidth || height != textureHeight )
@@ -247,27 +258,22 @@ void ScreenCapture::UploadFrame( const unsigned char* bgra, int width, int heigh
 		textureHeight = height;
 	}
 
-	//Upload straight from the mapped Direct3D memory, skipping the row padding.
-	glPixelStorei( GL_UNPACK_ROW_LENGTH, rowPitch / 4 );
 	glTexSubImage2D( GL_TEXTURE_2D, 0, 0, 0, width, height, GL_BGRA, GL_UNSIGNED_BYTE, bgra );
-	glPixelStorei( GL_UNPACK_ROW_LENGTH, 0 );
 	hasFrame = true;
 }
 
 void ScreenCapture::StartSelectedCapture()
 {
-	capture.Stop();
+	//Both calls return immediately; the capture thread does the actual work.
 	hasFrame = false;
-
 	if( selected.kind == CaptureTarget::Kind::None )
-		return;
-	if( !IsTargetAlive( selected ) )
 	{
-		Log( "La fuente ya no existe, pulsa 'Actualizar lista': " + selected.label );
+		LogToFile( "Fuente: (ninguna)" );
+		capture.Stop();
 		return;
 	}
-	if( !capture.Start( selected, showCursor ) )
-		Log( "No se pudo capturar " + selected.label + ": " + capture.GetLastError() );
+	LogToFile( "Fuente elegida: " + selected.label );
+	capture.Start( selected, showCursor );
 }
 
 void ScreenCapture::RefreshTargets()
@@ -385,6 +391,7 @@ void ScreenCapture::SyncUpdateUi( bool raiseEvents )
 void ScreenCapture::Log( const std::string& message )
 {
 	FFGLLog::LogToHost( ( "[Captura Pantalla] " + message ).c_str() );
+	LogToFile( message );
 }
 
 FFResult ScreenCapture::SetFloatParameter( unsigned int index, float value )
