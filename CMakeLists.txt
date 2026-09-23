@@ -159,7 +159,7 @@ add_ffgl_plugin(Zocalo
         src/Drawing.h
     WIN_SOURCES src/win/DrawingWin.cpp
     MAC_SOURCES src/mac/DrawingMac.mm
-    WIN_LIBRARIES windowscodecs
+    WIN_LIBRARIES windowscodecs windowsapp
     MAC_FRAMEWORKS CoreText ImageIO
 )
 
