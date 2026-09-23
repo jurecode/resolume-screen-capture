@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <map>
 #include <mutex>
 using namespace ffglex;
 
@@ -332,6 +333,55 @@ Zocalo::Zocalo()
 	SyncUpdateUi( false );
 }
 
+namespace
+{
+// Every visible Zocalo, so a clip that takes over can play the exit of one Resolume cut off.
+struct Published
+{
+	Zocalo::Look look;
+	uint64_t frames = 0;
+	std::chrono::steady_clock::time_point lastDrawn;
+};
+std::mutex registryMutex;
+std::map< const Zocalo*, Published > registry;
+
+const float CUT_OFF_RECENT = 0.25f;//A Zocalo drawn this recently was on screen when we started.
+const float CUT_OFF_CHECK  = 0.1f; //Wait this long to see whether it keeps drawing.
+const float HANDOFF_DELAY  = 0.7f; //Our entrance starts this far into the previous one's exit.
+
+void UploadBitmap( GLuint& texture, const Bitmap* bitmap )
+{
+	static const unsigned char transparent[ 4 ] = { 0, 0, 0, 0 };
+	if( texture == 0 )
+		glGenTextures( 1, &texture );
+	Scoped2DTextureBinding textureBinding( texture );
+	glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR );
+	glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR );
+	glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE );
+	glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE );
+	if( bitmap == nullptr || bitmap->Empty() )
+		glTexImage2D( GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, transparent );
+	else
+		glTexImage2D( GL_TEXTURE_2D, 0, GL_RGBA8, bitmap->width, bitmap->height, 0, GL_RGBA, GL_UNSIGNED_BYTE, bitmap->rgba.data() );
+	glGenerateMipmap( GL_TEXTURE_2D );
+}
+
+int WidthOf( const std::shared_ptr< const Bitmap >& bitmap )
+{
+	return bitmap ? bitmap->width : 0;
+}
+int HeightOf( const std::shared_ptr< const Bitmap >& bitmap )
+{
+	return bitmap ? bitmap->height : 0;
+}
+}// namespace
+
+Zocalo::~Zocalo()
+{
+	std::lock_guard< std::mutex > lock( registryMutex );
+	registry.erase( this );
+}
+
 FFResult Zocalo::InitGL( const FFGLViewportStruct* vp )
 {
 	static std::once_flag logVersionOnce;
@@ -342,8 +392,6 @@ FFResult Zocalo::InitGL( const FFGLViewportStruct* vp )
 		DeInitGL();
 		return FF_FAIL;
 	}
-	textsDirty  = true;
-	photoDirty  = true;
 	hasRendered = false;
 	return CFFGLPlugin::InitGL( vp );
 }
@@ -352,31 +400,27 @@ FFResult Zocalo::DeInitGL()
 {
 	shader.FreeGLResources();
 	quad.Release();
-	for( GLuint* texture : { &nameTexture, &subtitleTexture, &initialsTexture, &photoTexture } )
-	{
-		if( *texture != 0 )
-			glDeleteTextures( 1, texture );
-		*texture = 0;
-	}
+	Release( textures );
+	Release( outgoing.textures );
+	outgoing.active = false;
 	return FF_SUCCESS;
 }
 
-float Zocalo::Unit() const
+float Zocalo::Unit( float lookSize ) const
 {
-	return currentViewport.height / 1080.0f * ( 0.5f + size );
+	return currentViewport.height / 1080.0f * ( 0.5f + lookSize );
 }
 
-float Zocalo::BarLength() const
+float Zocalo::BarLength( const Look& look ) const
 {
-	float u         = Unit();
-	float nameWidth = nameBitmap.Empty() ? 0.0f : ( nameBitmap.width - 2 * Margin( NAME_RENDER ) ) * NAME_FONT * u / NAME_RENDER;
-	float subWidth  = subtitleBitmap.Empty() ? 0.0f : ( subtitleBitmap.width - 2 * Margin( SUB_RENDER ) ) * SUB_FONT * u / SUB_RENDER;
+	float u         = Unit( look.size );
+	float nameWidth = look.name && !look.name->Empty() ? ( look.name->width - 2 * Margin( NAME_RENDER ) ) * NAME_FONT * u / NAME_RENDER : 0.0f;
+	float subWidth  = look.subtitle && !look.subtitle->Empty() ? ( look.subtitle->width - 2 * Margin( SUB_RENDER ) ) * SUB_FONT * u / SUB_RENDER : 0.0f;
 	return ( RADIUS + PAD_INNER + PAD_OUTER ) * u + std::max( nameWidth, subWidth );
 }
 
-Zocalo::Layout Zocalo::LayoutFor( int corner ) const
+Zocalo::Layout Zocalo::LayoutFor( int corner, float u, float barLength ) const
 {
-	float u = Unit();
 	float width = static_cast< float >( currentViewport.width ), height = static_cast< float >( currentViewport.height );
 	float radius = RADIUS * u, marginX = MARGIN_X * u, marginY = MARGIN_Y * u;
 	switch( corner )
@@ -385,7 +429,7 @@ Zocalo::Layout Zocalo::LayoutFor( int corner ) const
 		return { width - marginX - radius, height - marginY - radius, -1.0f };
 	case POSITION_BOTTOM_CENTER:
 		//Centre the whole group: from the photo's left edge to the bar's end.
-		return { width * 0.5f - ( barLengthShown - radius ) * 0.5f, height - marginY - radius, 1.0f };
+		return { width * 0.5f - ( barLength - radius ) * 0.5f, height - marginY - radius, 1.0f };
 	case POSITION_TOP_LEFT:
 		return { marginX + radius, marginY + radius, 1.0f };
 	case POSITION_TOP_RIGHT:
@@ -394,6 +438,22 @@ Zocalo::Layout Zocalo::LayoutFor( int corner ) const
 	default:
 		return { marginX + radius, height - marginY - radius, 1.0f };
 	}
+}
+
+Zocalo::Look Zocalo::CurrentLook() const
+{
+	Look look;
+	look.name     = nameBitmap;
+	look.subtitle = subtitleBitmap;
+	look.initials = initialsBitmap;
+	look.photo    = photoBitmap;
+	std::copy( barHsba, barHsba + 4, look.barHsba );
+	std::copy( accentHsba, accentHsba + 4, look.accentHsba );
+	look.roundPhoto = roundPhoto;
+	look.size       = size;
+	look.position   = position;
+	look.barLength  = barLengthShown;
+	return look;
 }
 
 void Zocalo::StartPhase( Phase next )
@@ -406,21 +466,65 @@ void Zocalo::StartPhase( Phase next )
 void Zocalo::Advance()
 {
 	Clock::time_point now = Clock::now();
-	float elapsed = hasRendered ? std::chrono::duration< float >( now - lastFrame ).count() : 0.0f;
+	float elapsed    = hasRendered ? std::chrono::duration< float >( now - lastFrame ).count() : 0.0f;
 	bool reactivated = !hasRendered || elapsed > REACTIVATE_GAP;
-	lastFrame   = now;
-	hasRendered = true;
+	lastFrame        = now;
+	hasRendered      = true;
 	if( reactivated )
 	{
 		elapsed      = 0;
 		activatedAt  = now;
 		ownClipKnown = false;
+
+		//Remember every other Zocalo on screen right now: if one stops drawing, Resolume cut it
+		//off to start us (same layer), and we play its exit for it.
+		candidates.clear();
+		{
+			std::lock_guard< std::mutex > lock( registryMutex );
+			for( const auto& entry : registry )
+				if( entry.first != this && std::chrono::duration< float >( now - entry.second.lastDrawn ).count() < CUT_OFF_RECENT )
+					candidates.push_back( { entry.first, entry.second.frames, entry.second.lastDrawn, entry.second.look } );
+		}
+		candidatesCheckAt = now + std::chrono::duration_cast< Clock::duration >( std::chrono::duration< float >( CUT_OFF_CHECK ) );
+
+		//Until we know, keep the most recent one on screen exactly as it was, so a cut-off
+		//Zocalo never blinks out.
+		outgoing.active = false;
+		const Candidate* latest = nullptr;
+		for( const Candidate& candidate : candidates )
+			if( latest == nullptr || candidate.lastDrawn > latest->lastDrawn )
+				latest = &candidate;
+		if( latest != nullptr )
+		{
+			outgoing.active = true;
+			outgoing.look   = latest->look;
+			outgoing.time   = 0;
+		}
 		if( autoEnter )
 			StartPhase( Phase::Entering );
 	}
 	HandleClipTriggers();
-	elapsed = std::min( elapsed, 0.1f );
-	phaseTime += elapsed * ( 0.4f + speed * 1.2f );
+
+	//When the name changes while visible, the bar stretches to fit instead of jumping.
+	float target   = BarLength( CurrentLook() );
+	barLengthShown = barLengthShown <= 0.0f ? target : barLengthShown + ( target - barLengthShown ) * std::min( 1.0f, elapsed * 10.0f );
+
+	if( !candidates.empty() )
+	{
+		if( now < candidatesCheckAt )
+			return;//Hold our entrance until we know whether to play someone's exit first.
+		CheckCutOffCandidates( now );
+	}
+
+	elapsed    = std::min( elapsed, 0.1f );
+	float step = elapsed * ( 0.4f + speed * 1.2f );
+	if( outgoing.active )
+	{
+		outgoing.time += step;
+		if( outgoing.time >= EXIT_END )
+			outgoing.active = false;
+	}
+	phaseTime += step;
 
 	switch( phase )
 	{
@@ -444,10 +548,45 @@ void Zocalo::Advance()
 	case Phase::Hidden:
 		break;
 	}
+}
 
-	//When the name changes while visible, the bar stretches to fit instead of jumping.
-	float target   = BarLength();
-	barLengthShown = barLengthShown <= 0.0f ? target : barLengthShown + ( target - barLengthShown ) * std::min( 1.0f, elapsed * 10.0f );
+void Zocalo::CheckCutOffCandidates( Clock::time_point now )
+{
+	std::vector< Candidate > waiting;
+	waiting.swap( candidates );
+	std::lock_guard< std::mutex > lock( registryMutex );
+	const Candidate* cutOff = nullptr;
+	for( const Candidate& candidate : waiting )
+	{
+		auto entry = registry.find( candidate.owner );
+		bool stillDrawing = entry != registry.end() && entry->second.frames > candidate.frames;
+		if( !stillDrawing && ( cutOff == nullptr || candidate.lastDrawn > cutOff->lastDrawn ) )
+			cutOff = &candidate;//Still drawing ones are in other layers: they leave by themselves.
+	}
+
+	outgoing.active = cutOff != nullptr;
+	if( cutOff == nullptr )
+		return;
+	outgoing.look = cutOff->look;
+	outgoing.time = 0;
+	if( phase == Phase::Entering )
+		phaseTime = -HANDOFF_DELAY;//Our entrance waits for its exit to get going.
+	LogToFile( "Otro zocalo se corto al cambiar de clip: se anima su salida y luego esta entrada" );
+}
+
+void Zocalo::Publish( Clock::time_point now )
+{
+	std::lock_guard< std::mutex > lock( registryMutex );
+	bool onScreen = phase == Phase::Entering || phase == Phase::Shown || phase == Phase::Moving;
+	if( !onScreen )
+	{
+		registry.erase( this );
+		return;
+	}
+	Published& entry = registry[ this ];
+	entry.look       = CurrentLook();
+	entry.frames     = ++publishedFrames;
+	entry.lastDrawn  = now;
 }
 
 void Zocalo::HandleClipTriggers()
@@ -490,6 +629,16 @@ void Zocalo::HandleClipTriggers()
 	}
 }
 
+Zocalo::Pose Zocalo::ExitPose( float t )
+{
+	Pose pose;
+	pose.subtitle = 1 - EaseInCubic( Seg( t, 0.0f, 0.25f ) );
+	pose.name     = 1 - EaseInCubic( Seg( t, 0.05f, 0.3f ) );
+	pose.bar      = 1 - EaseInCubic( Seg( t, 0.2f, 0.6f ) );
+	pose.photo    = 1 - EaseInCubic( Seg( t, 0.5f, EXIT_END ) );
+	return pose;
+}
+
 Zocalo::Pose Zocalo::CurrentPose() const
 {
 	Pose pose;
@@ -508,10 +657,7 @@ Zocalo::Pose Zocalo::CurrentPose() const
 		pose.subtitle = EaseOutCubic( Seg( t, 0.75f, 1.25f ) );
 		break;
 	case Phase::Exiting:
-		pose.subtitle = 1 - EaseInCubic( Seg( t, 0.0f, 0.25f ) );
-		pose.name     = 1 - EaseInCubic( Seg( t, 0.05f, 0.3f ) );
-		pose.bar      = 1 - EaseInCubic( Seg( t, 0.2f, 0.6f ) );
-		pose.photo    = 1 - EaseInCubic( Seg( t, 0.5f, EXIT_END ) );
+		pose = ExitPose( t );
 		break;
 	case Phase::Moving:
 		//Fold the bar into the photo, travel, unfold at the new corner.
@@ -519,10 +665,11 @@ Zocalo::Pose Zocalo::CurrentPose() const
 		pose.travel = EaseInOutCubic( Seg( t, 0.6f, MOVE_RETURN ) );
 		if( t < MOVE_RETURN )
 		{
+			Pose folding   = ExitPose( t );
 			pose.newCorner = false;
-			pose.subtitle  = 1 - EaseInCubic( Seg( t, 0.0f, 0.25f ) );
-			pose.name      = 1 - EaseInCubic( Seg( t, 0.05f, 0.3f ) );
-			pose.bar       = 1 - EaseInCubic( Seg( t, 0.2f, 0.6f ) );
+			pose.subtitle  = folding.subtitle;
+			pose.name      = folding.name;
+			pose.bar       = folding.bar;
 		}
 		else
 		{
@@ -535,34 +682,37 @@ Zocalo::Pose Zocalo::CurrentPose() const
 	return pose;
 }
 
-void Zocalo::UploadBitmap( GLuint& texture, const Bitmap& bitmap )
+void Zocalo::Upload( Textures& target, const Look& look )
 {
-	static const unsigned char transparent[ 4 ] = { 0, 0, 0, 0 };
-	if( texture == 0 )
-		glGenTextures( 1, &texture );
-	Scoped2DTextureBinding textureBinding( texture );
-	glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR );
-	glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR );
-	glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE );
-	glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE );
-	if( bitmap.Empty() )
-		glTexImage2D( GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, transparent );
-	else
-		glTexImage2D( GL_TEXTURE_2D, 0, GL_RGBA8, bitmap.width, bitmap.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, bitmap.rgba.data() );
-	glGenerateMipmap( GL_TEXTURE_2D );
+	const std::shared_ptr< const Bitmap >* sources[ 4 ] = { &look.name, &look.subtitle, &look.initials, &look.photo };
+	for( int index = 0; index < 4; ++index )
+	{
+		if( target.ids[ index ] != 0 && target.uploaded[ index ] == *sources[ index ] )
+			continue;
+		UploadBitmap( target.ids[ index ], sources[ index ]->get() );
+		target.uploaded[ index ] = *sources[ index ];
+	}
 }
 
-void Zocalo::RefreshTextures()
+void Zocalo::Release( Textures& target )
+{
+	for( int index = 0; index < 4; ++index )
+	{
+		if( target.ids[ index ] != 0 )
+			glDeleteTextures( 1, &target.ids[ index ] );
+		target.ids[ index ] = 0;
+		target.uploaded[ index ].reset();
+	}
+}
+
+void Zocalo::RefreshBitmaps()
 {
 	if( textsDirty )
 	{
 		textsDirty     = false;
-		nameBitmap     = drawing::RenderText( name, NAME_RENDER, true );
-		subtitleBitmap = drawing::RenderText( subtitle, SUB_RENDER, false );
-		initialsBitmap = drawing::RenderText( Initials( name ), INITIALS_RENDER, true );
-		UploadBitmap( nameTexture, nameBitmap );
-		UploadBitmap( subtitleTexture, subtitleBitmap );
-		UploadBitmap( initialsTexture, initialsBitmap );
+		nameBitmap     = std::make_shared< const Bitmap >( drawing::RenderText( name, NAME_RENDER, true ) );
+		subtitleBitmap = std::make_shared< const Bitmap >( drawing::RenderText( subtitle, SUB_RENDER, false ) );
+		initialsBitmap = std::make_shared< const Bitmap >( drawing::RenderText( Initials( name ), INITIALS_RENDER, true ) );
 	}
 
 	if( photoLoad.valid() && photoLoad.wait_for( std::chrono::seconds( 0 ) ) == std::future_status::ready )
@@ -570,76 +720,56 @@ void Zocalo::RefreshTextures()
 		PhotoResult result = photoLoad.get();
 		if( !result.error.empty() )
 			Log( result.error );
-		photoBitmap = std::move( result.bitmap );
-		photoDirty  = true;
-	}
-	if( photoDirty )
-	{
-		photoDirty = false;
-		hasPhoto   = !photoBitmap.Empty();
-		UploadBitmap( photoTexture, photoBitmap );
+		photoBitmap = result.bitmap.Empty() ? nullptr : std::make_shared< const Bitmap >( std::move( result.bitmap ) );
 	}
 }
 
-FFResult Zocalo::ProcessOpenGL( ProcessOpenGLStruct* pGL )
+void Zocalo::Draw( const Look& look, Textures& target, const Pose& pose, const Layout& layout, float barLengthFull )
 {
-	SyncUpdateUi( true );
-	RefreshTextures();
-	Advance();
-
-	Pose pose    = CurrentPose();
-	float u      = Unit();
-	Layout here  = LayoutFor( position );
-	float centerX = here.centerX, centerY = here.centerY, direction = here.direction;
-	if( phase == Phase::Moving )
-	{
-		centerX = movingFromX + ( here.centerX - movingFromX ) * pose.travel;
-		centerY = movingFromY + ( here.centerY - movingFromY ) * pose.travel;
-		if( !pose.newCorner )
-			direction = LayoutFor( movingFrom ).direction;
-	}
+	float u         = Unit( look.size );
+	float centerX   = layout.centerX, centerY = layout.centerY, direction = layout.direction;
 
 	//Bar: from the photo's centre (hidden behind it) outwards.
-	float barLength = barLengthShown * pose.bar;
+	float barLength = barLengthFull * pose.bar;
 	float barTop    = centerY - BAR_HEIGHT * u * 0.5f;
 	float barBottom = barTop + BAR_HEIGHT * u;
 	float barLeft   = direction > 0 ? centerX : centerX - barLength;
 	float barRight  = direction > 0 ? centerX + barLength : centerX;
 
 	//Texts: name above subtitle, vertically centred above the accent stripe.
-	float nameScale    = NAME_FONT * u / NAME_RENDER;
-	float subScale     = SUB_FONT * u / SUB_RENDER;
-	float nameMargin   = Margin( NAME_RENDER ) * nameScale;
-	float subMargin    = Margin( SUB_RENDER ) * subScale;
-	float nameHeight   = nameBitmap.Empty() ? 0.0f : nameBitmap.height * nameScale - 2 * nameMargin;
-	float subHeight    = subtitleBitmap.Empty() ? 0.0f : subtitleBitmap.height * subScale - 2 * subMargin;
-	float blockTop     = barTop + ( BAR_HEIGHT * u - STRIPE * u - nameHeight - subHeight ) * 0.5f;
-	float textStart    = centerX + direction * ( RADIUS + PAD_INNER ) * u;
-	auto textRect = [ & ]( const Bitmap& bitmap, float scale, float margin, float top, float progress, float rect[ 4 ] ) {
-		float width = bitmap.width * scale, height = bitmap.height * scale;
-		float slide = -direction * ( 1.0f - progress ) * TEXT_SLIDE * u;
-		float left  = direction > 0 ? textStart - margin + slide : textStart + margin - width + slide;
+	float nameScale  = NAME_FONT * u / NAME_RENDER;
+	float subScale   = SUB_FONT * u / SUB_RENDER;
+	float nameMargin = Margin( NAME_RENDER ) * nameScale;
+	float subMargin  = Margin( SUB_RENDER ) * subScale;
+	float nameHeight = HeightOf( look.name ) > 0 ? HeightOf( look.name ) * nameScale - 2 * nameMargin : 0.0f;
+	float subHeight  = HeightOf( look.subtitle ) > 0 ? HeightOf( look.subtitle ) * subScale - 2 * subMargin : 0.0f;
+	float blockTop   = barTop + ( BAR_HEIGHT * u - STRIPE * u - nameHeight - subHeight ) * 0.5f;
+	float textStart  = centerX + direction * ( RADIUS + PAD_INNER ) * u;
+	auto textRect = [ & ]( int width, int height, float scale, float margin, float top, float progress, float rect[ 4 ] ) {
+		float drawnWidth = width * scale, drawnHeight = height * scale;
+		float slide      = -direction * ( 1.0f - progress ) * TEXT_SLIDE * u;
+		float left       = direction > 0 ? textStart - margin + slide : textStart + margin - drawnWidth + slide;
 		rect[ 0 ] = left;
 		rect[ 1 ] = top - margin;
-		rect[ 2 ] = left + width;
-		rect[ 3 ] = top - margin + height;
+		rect[ 2 ] = left + drawnWidth;
+		rect[ 3 ] = top - margin + drawnHeight;
 	};
 	float nameRect[ 4 ], subRect[ 4 ];
-	textRect( nameBitmap, nameScale, nameMargin, blockTop, pose.name, nameRect );
-	textRect( subtitleBitmap, subScale, subMargin, blockTop + nameHeight, pose.subtitle, subRect );
+	textRect( WidthOf( look.name ), HeightOf( look.name ), nameScale, nameMargin, blockTop, pose.name, nameRect );
+	textRect( WidthOf( look.subtitle ), HeightOf( look.subtitle ), subScale, subMargin, blockTop + nameHeight, pose.subtitle, subRect );
 
 	//Colours.
 	float bar[ 4 ], accent[ 3 ];
-	HSVtoRGB( barHsba[ 0 ] >= 1.0f ? 0.0f : barHsba[ 0 ], barHsba[ 1 ], barHsba[ 2 ], bar[ 0 ], bar[ 1 ], bar[ 2 ] );
-	bar[ 3 ] = barHsba[ 3 ];
-	HSVtoRGB( accentHsba[ 0 ] >= 1.0f ? 0.0f : accentHsba[ 0 ], accentHsba[ 1 ], accentHsba[ 2 ], accent[ 0 ], accent[ 1 ], accent[ 2 ] );
-	float text     = Luminance( bar[ 0 ], bar[ 1 ], bar[ 2 ] ) > 0.55f ? 0.07f : 1.0f;
+	HSVtoRGB( look.barHsba[ 0 ] >= 1.0f ? 0.0f : look.barHsba[ 0 ], look.barHsba[ 1 ], look.barHsba[ 2 ], bar[ 0 ], bar[ 1 ], bar[ 2 ] );
+	bar[ 3 ] = look.barHsba[ 3 ];
+	HSVtoRGB( look.accentHsba[ 0 ] >= 1.0f ? 0.0f : look.accentHsba[ 0 ], look.accentHsba[ 1 ], look.accentHsba[ 2 ], accent[ 0 ], accent[ 1 ], accent[ 2 ] );
+	float text        = Luminance( bar[ 0 ], bar[ 1 ], bar[ 2 ] ) > 0.55f ? 0.07f : 1.0f;
 	bool darkOnAccent = Luminance( accent[ 0 ], accent[ 1 ], accent[ 2 ] ) > 0.55f;
+	bool hasPhoto     = look.photo && !look.photo->Empty();
 
-	float photoRadius   = RADIUS * u * std::max( 0.0f, pose.photo );
-	float initialsScale = RADIUS * u * 1.0f / INITIALS_RENDER;
+	float photoScale    = std::max( 0.0f, pose.photo );
+	float initialsScale = RADIUS * u / INITIALS_RENDER * photoScale;
 
-	ScopedShaderBinding shaderBinding( shader.GetGLID() );
 	shader.Set( "Resolution", static_cast< float >( currentViewport.width ), static_cast< float >( currentViewport.height ) );
 	shader.Set( "Bar", barLeft, barTop, barRight, barBottom );
 	shader.Set( "BarRadius", BAR_RADIUS * u );
@@ -652,29 +782,25 @@ FFResult Zocalo::ProcessOpenGL( ProcessOpenGLStruct* pGL )
 	shader.Set( "SubtitleRect", subRect[ 0 ], subRect[ 1 ], subRect[ 2 ], subRect[ 3 ] );
 	shader.Set( "SubtitleAlpha", pose.subtitle );
 	shader.Set( "PhotoCenter", centerX, centerY );
-	shader.Set( "PhotoRadius", photoRadius );
-	shader.Set( "PhotoAlpha", std::min( 1.0f, std::max( 0.0f, pose.photo * 1.5f ) ) );
-	shader.Set( "Ring", RING * u * std::min( 1.0f, std::max( 0.0f, pose.photo ) ) );
-	shader.Set( "RoundPhoto", roundPhoto ? 1 : 0 );
+	shader.Set( "PhotoRadius", RADIUS * u * photoScale );
+	shader.Set( "PhotoAlpha", std::min( 1.0f, pose.photo * 1.5f ) > 0.0f ? std::min( 1.0f, pose.photo * 1.5f ) : 0.0f );
+	shader.Set( "Ring", RING * u * std::min( 1.0f, photoScale ) );
+	shader.Set( "RoundPhoto", look.roundPhoto ? 1 : 0 );
 	shader.Set( "HasPhoto", hasPhoto ? 1 : 0 );
-	shader.Set( "PhotoSize", static_cast< float >( std::max( 1, photoBitmap.width ) ), static_cast< float >( std::max( 1, photoBitmap.height ) ) );
-	shader.Set( "InitialsSize", initialsBitmap.width * initialsScale * std::max( 0.0f, pose.photo ), initialsBitmap.height * initialsScale * std::max( 0.0f, pose.photo ) );
+	shader.Set( "PhotoSize", static_cast< float >( std::max( 1, WidthOf( look.photo ) ) ), static_cast< float >( std::max( 1, HeightOf( look.photo ) ) ) );
+	shader.Set( "InitialsSize", WidthOf( look.initials ) * initialsScale, HeightOf( look.initials ) * initialsScale );
 	if( darkOnAccent )
 		shader.Set( "InitialsColor", bar[ 0 ], bar[ 1 ], bar[ 2 ] );
 	else
 		shader.Set( "InitialsColor", 1.0f, 1.0f, 1.0f );
 
 	//One texture unit per image.
-	struct Binding
-	{
-		const char* name;
-		GLuint texture;
-	} bindings[] = { { "NameTexture", nameTexture }, { "SubtitleTexture", subtitleTexture }, { "PhotoTexture", photoTexture }, { "InitialsTexture", initialsTexture } };
+	const char* samplers[ 4 ] = { "NameTexture", "SubtitleTexture", "InitialsTexture", "PhotoTexture" };
 	for( int unit = 0; unit < 4; ++unit )
 	{
 		glActiveTexture( GL_TEXTURE0 + unit );
-		glBindTexture( GL_TEXTURE_2D, bindings[ unit ].texture );
-		shader.Set( bindings[ unit ].name, unit );
+		glBindTexture( GL_TEXTURE_2D, target.ids[ unit ] );
+		shader.Set( samplers[ unit ], unit );
 	}
 	quad.Draw();
 	for( int unit = 3; unit >= 0; --unit )
@@ -682,6 +808,59 @@ FFResult Zocalo::ProcessOpenGL( ProcessOpenGLStruct* pGL )
 		glActiveTexture( GL_TEXTURE0 + unit );
 		glBindTexture( GL_TEXTURE_2D, 0 );
 	}
+}
+
+FFResult Zocalo::ProcessOpenGL( ProcessOpenGLStruct* pGL )
+{
+	SyncUpdateUi( true );
+	RefreshBitmaps();
+	Advance();
+
+	Look own = CurrentLook();
+	Upload( textures, own );
+	if( outgoing.active )
+		Upload( outgoing.textures, outgoing.look );
+
+	ScopedShaderBinding shaderBinding( shader.GetGLID() );
+
+	//The previous Zocalo leaving, then ours on top.
+	bool blendOurs = false;
+	if( outgoing.active )
+	{
+		float u = Unit( outgoing.look.size );
+		Draw( outgoing.look, outgoing.textures, ExitPose( outgoing.time ), LayoutFor( outgoing.look.position, u, outgoing.look.barLength ), outgoing.look.barLength );
+		blendOurs = true;
+	}
+	else if( outgoing.textures.ids[ 0 ] != 0 )
+	{
+		Release( outgoing.textures );
+	}
+
+	Pose pose     = CurrentPose();
+	float u       = Unit( size );
+	Layout layout = LayoutFor( position, u, barLengthShown );
+	if( phase == Phase::Moving )
+	{
+		layout.centerX = movingFromX + ( layout.centerX - movingFromX ) * pose.travel;
+		layout.centerY = movingFromY + ( layout.centerY - movingFromY ) * pose.travel;
+		if( !pose.newCorner )
+			layout.direction = LayoutFor( movingFrom, u, barLengthShown ).direction;
+	}
+
+	if( blendOurs )
+	{
+		//Our shader writes straight alpha; blend it over the leaving one.
+		glEnable( GL_BLEND );
+		glBlendFuncSeparate( GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA );
+	}
+	Draw( own, textures, pose, layout, barLengthShown );
+	if( blendOurs )
+	{
+		glBlendFunc( GL_ONE, GL_ZERO );
+		glDisable( GL_BLEND );
+	}
+
+	Publish( lastFrame );
 	return FF_SUCCESS;
 }
 
@@ -697,7 +876,7 @@ FFResult Zocalo::SetFloatParameter( unsigned int index, float value )
 		if( phase == Phase::Shown || phase == Phase::Moving )
 		{
 			//Travel from wherever the photo is right now.
-			Layout from = LayoutFor( position );
+			Layout from = LayoutFor( position, Unit( size ), barLengthShown );
 			float fromX = from.centerX, fromY = from.centerY;
 			if( phase == Phase::Moving )
 			{
@@ -783,10 +962,7 @@ FFResult Zocalo::SetTextParameter( unsigned int index, const char* value )
 			break;
 		photoPath = text;
 		if( text.empty() )
-		{
-			photoBitmap = Bitmap();
-			photoDirty  = true;
-		}
+			photoBitmap = nullptr;
 		else
 		{
 			//Big photos take a moment to decode: do it off Resolume's thread.

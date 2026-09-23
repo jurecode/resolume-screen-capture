@@ -116,6 +116,9 @@ Resolume no avisa a los plugins cuando disparas otro clip, pero sí puede avisar
 
 Si no sale, revisa `Documentos/Zocalo-log.txt`: debe decir "OSC: llegan mensajes de Resolume" y anotar los mensajes de clips que recibe.
 
+### Varios zócalos en la misma capa
+Puedes tener un zócalo por persona en **la misma capa** y dispararlos uno tras otro. Resolume corta el clip anterior al instante, así que el zócalo nuevo **anima la salida del anterior** (con su foto y su nombre) y después hace su propia entrada. No hace falta configurar nada.
+
 Idea de uso: una fila de clips con un zócalo por orador, cada uno con su foto y nombre, y los disparas con un clic o un Stream Deck.
 
 Archivos: `Zocalo.dll` (Windows) y `Zocalo-mac.zip` (Mac), en la misma página de Releases. Se instalan igual que Captura Pantalla y se actualizan solos. Su registro está en `Documentos/Zocalo-log.txt`.
