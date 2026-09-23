@@ -33,10 +33,11 @@ jobs:
           $notes | Set-Content -Encoding utf8 notes.txt
 
       - name: Configure
+        shell: bash
         run: >
           cmake -S . -B build -G "Visual Studio 17 2022" -A x64
-          -DPLUGIN_VERSION=${{ steps.meta.outputs.version }}
-          -DUPDATE_MANIFEST_URL=https://github.com/${{ github.repository }}/releases/latest/download/latest.json
+          "-DPLUGIN_VERSION=${{ steps.meta.outputs.version }}"
+          "-DUPDATE_MANIFEST_URL=https://github.com/${{ github.repository }}/releases/latest/download/latest.json"
 
       - name: Build
         run: cmake --build build --config Release
