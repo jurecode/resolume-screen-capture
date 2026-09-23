@@ -304,7 +304,7 @@ void ShowNotification( std::string title, std::string text )
 		icon.hWnd        = window;
 		icon.uID         = 1;
 		icon.uFlags      = NIF_ICON | NIF_TIP | NIF_INFO;
-		icon.hIcon       = LoadIconW( nullptr, IDI_INFORMATION );
+		icon.hIcon       = LoadIconW( nullptr, MAKEINTRESOURCEW( 32516 ) );//IDI_INFORMATION
 		icon.dwInfoFlags = NIIF_INFO;
 		wcsncpy_s( icon.szTip, L"Captura Pantalla (Resolume)", _TRUNCATE );
 		wcsncpy_s( icon.szInfoTitle, FromUtf8( title ).c_str(), _TRUNCATE );
