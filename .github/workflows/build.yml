@@ -34,8 +34,11 @@ jobs:
       - name: Build
         run: cmake --build build -j 4
 
-      - name: Zip bundle
-        run: ditto -c -k --keepParent build/ScreenCapture.bundle ScreenCapture-mac.zip
+      - name: Sign bundle (ad-hoc) and zip
+        run: |
+          codesign --force --deep --sign - build/ScreenCapture.bundle
+          codesign --verify --strict build/ScreenCapture.bundle
+          ditto -c -k --keepParent build/ScreenCapture.bundle ScreenCapture-mac.zip
 
       - uses: actions/upload-artifact@v4
         with:
