@@ -22,15 +22,14 @@ std::wstring Truncate( const std::wstring& text, size_t maxChars )
 	return text.substr( 0, cut ) + L"\x2026";
 }
 
+// InternalGetWindowText reads the title Windows already stores, unlike GetWindowText(Length)
+// which sends a message to the window and waits for its thread to answer. Waiting like that
+// can hang on a frozen app, or deadlock against Resolume's own UI thread while it waits for us.
 std::wstring GetWindowTitle( HWND hwnd )
 {
-	int length = GetWindowTextLengthW( hwnd );
-	if( length <= 0 )
-		return {};
-	std::wstring title( static_cast< size_t >( length ) + 1, L'\0' );
-	length = GetWindowTextW( hwnd, &title[ 0 ], length + 1 );
-	title.resize( static_cast< size_t >( length > 0 ? length : 0 ) );
-	return title;
+	wchar_t title[ 512 ];
+	int length = InternalGetWindowText( hwnd, title, ARRAYSIZE( title ) );
+	return std::wstring( title, length > 0 ? static_cast< size_t >( length ) : 0 );
 }
 
 std::wstring GetProcessName( HWND hwnd )
@@ -59,6 +58,10 @@ std::wstring GetProcessName( HWND hwnd )
 // the user sees in the taskbar / Alt+Tab.
 bool IsCapturableWindow( HWND hwnd )
 {
+	DWORD processId = 0;
+	GetWindowThreadProcessId( hwnd, &processId );
+	if( processId == GetCurrentProcessId() )
+		return false;//Resolume itself: capturing it only makes an infinite mirror.
 	if( hwnd == GetShellWindow() || hwnd == GetDesktopWindow() )
 		return false;
 	if( !IsWindowVisible( hwnd ) )
@@ -69,9 +72,6 @@ bool IsCapturableWindow( HWND hwnd )
 		return false;
 	if( GetWindowLongW( hwnd, GWL_EXSTYLE ) & WS_EX_TOOLWINDOW )
 		return false;
-	if( GetWindowTextLengthW( hwnd ) == 0 )
-		return false;
-
 	DWORD cloaked = 0;
 	if( SUCCEEDED( DwmGetWindowAttribute( hwnd, DWMWA_CLOAKED, &cloaked, sizeof( cloaked ) ) ) && cloaked )
 		return false;//Hidden UWP apps / windows on other virtual desktops.
@@ -115,6 +115,8 @@ BOOL CALLBACK AddWindow( HWND hwnd, LPARAM param )
 
 	auto& targets             = *reinterpret_cast< std::vector< CaptureTarget >* >( param );
 	std::wstring title        = GetWindowTitle( hwnd );
+	if( title.empty() )
+		return TRUE;
 	std::wstring processName  = GetProcessName( hwnd );
 	std::wstring label        = L"Ventana: " + Truncate( title, MAX_TITLE_CHARS );
 	if( !processName.empty() )
