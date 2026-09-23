@@ -1,7 +1,7 @@
 #pragma once
 #include <FFGLSDK.h>
 #include "CaptureTargets.h"
-#include "WgcCapture.h"
+#include "CaptureEngine.h"
 #include "Updater.h"
 #include <chrono>
 
@@ -41,7 +41,7 @@ private:
 	float crop[ 4 ]      = { 0.0f, 0.0f, 0.0f, 0.0f };//left, right, top, bottom
 	bool restartRequired = true;
 
-	WgcCapture capture;
+	CaptureEngine capture;
 	std::chrono::steady_clock::time_point lastSearchRetry;
 	uint32_t shownUpdateRevision = UINT32_MAX;
 	std::string lastCaptureError;

@@ -1,5 +1,5 @@
-#include "WgcCapture.h"
-#include "FileLog.h"
+#include "../CaptureEngine.h"
+#include "../FileLog.h"
 
 #include <unknwn.h>
 #include <inspectable.h>
@@ -100,7 +100,7 @@ enum class Phase
 };
 }// namespace
 
-struct WgcCapture::Impl
+struct CaptureEngine::Impl
 {
 	// ---- Shared between the render thread and the capture thread (guarded by mutex) ----
 	std::mutex mutex;
@@ -273,7 +273,7 @@ struct WgcCapture::Impl
 
 	void Open( const CaptureTarget& target, bool cursor )
 	{
-		activeWindow  = target.kind == CaptureTarget::Kind::Window ? target.window : nullptr;
+		activeWindow  = target.kind == CaptureTarget::Kind::Window ? reinterpret_cast< HWND >( target.id ) : nullptr;
 		wasMinimized  = false;
 		activeLabel   = target.label;
 		gotFirstFrame = false;
@@ -295,9 +295,9 @@ struct WgcCapture::Impl
 			auto interop = winrt::get_activation_factory< wgc::GraphicsCaptureItem, IGraphicsCaptureItemInterop >();
 			wgc::GraphicsCaptureItem newItem{ nullptr };
 			if( target.kind == CaptureTarget::Kind::Window )
-				winrt::check_hresult( interop->CreateForWindow( target.window, winrt::guid_of< wgc::IGraphicsCaptureItem >(), winrt::put_abi( newItem ) ) );
+				winrt::check_hresult( interop->CreateForWindow( reinterpret_cast< HWND >( target.id ), winrt::guid_of< wgc::IGraphicsCaptureItem >(), winrt::put_abi( newItem ) ) );
 			else
-				winrt::check_hresult( interop->CreateForMonitor( target.monitor, winrt::guid_of< wgc::IGraphicsCaptureItem >(), winrt::put_abi( newItem ) ) );
+				winrt::check_hresult( interop->CreateForMonitor( reinterpret_cast< HMONITOR >( target.id ), winrt::guid_of< wgc::IGraphicsCaptureItem >(), winrt::put_abi( newItem ) ) );
 
 			item       = newItem;
 			poolSize   = AtLeastOnePixel( item.Size() );
@@ -485,7 +485,7 @@ struct WgcCapture::Impl
 	}
 };
 
-WgcCapture::WgcCapture() :
+CaptureEngine::CaptureEngine() :
 	impl( std::make_shared< Impl >() )
 {
 	PinThisModule();
@@ -493,7 +493,7 @@ WgcCapture::WgcCapture() :
 	worker                        = std::thread( [ state ] { state->Run(); } );
 }
 
-WgcCapture::~WgcCapture()
+CaptureEngine::~CaptureEngine()
 {
 	{
 		std::lock_guard< std::mutex > lock( impl->mutex );
@@ -513,7 +513,7 @@ WgcCapture::~WgcCapture()
 	}
 }
 
-bool WgcCapture::IsSupported()
+bool CaptureEngine::IsSupported()
 {
 	EnsureWinRTUsable();
 	try
@@ -526,7 +526,12 @@ bool WgcCapture::IsSupported()
 	}
 }
 
-void WgcCapture::Start( const CaptureTarget& target, bool showCursor )
+bool CaptureEngine::HasPermission()
+{
+	return true;
+}
+
+void CaptureEngine::Start( const CaptureTarget& target, bool showCursor )
 {
 	{
 		std::lock_guard< std::mutex > lock( impl->mutex );
@@ -539,7 +544,7 @@ void WgcCapture::Start( const CaptureTarget& target, bool showCursor )
 	SetEvent( impl->wakeEvent );
 }
 
-void WgcCapture::Stop()
+void CaptureEngine::Stop()
 {
 	{
 		std::lock_guard< std::mutex > lock( impl->mutex );
@@ -550,7 +555,7 @@ void WgcCapture::Stop()
 	SetEvent( impl->wakeEvent );
 }
 
-void WgcCapture::SetRestoreMinimized( bool restore )
+void CaptureEngine::SetRestoreMinimized( bool restore )
 {
 	{
 		std::lock_guard< std::mutex > lock( impl->mutex );
@@ -559,7 +564,7 @@ void WgcCapture::SetRestoreMinimized( bool restore )
 	SetEvent( impl->wakeEvent );
 }
 
-void WgcCapture::SetCursorVisible( bool visible )
+void CaptureEngine::SetCursorVisible( bool visible )
 {
 	{
 		std::lock_guard< std::mutex > lock( impl->mutex );
@@ -568,18 +573,18 @@ void WgcCapture::SetCursorVisible( bool visible )
 	SetEvent( impl->wakeEvent );
 }
 
-bool WgcCapture::IsActive() const
+bool CaptureEngine::IsActive() const
 {
 	Phase phase = impl->phase;
 	return phase == Phase::Starting || phase == Phase::Running;
 }
 
-bool WgcCapture::WasClosed() const
+bool CaptureEngine::WasClosed() const
 {
 	return impl->phase == Phase::Closed;
 }
 
-bool WgcCapture::TakeFrame( const FrameCallback& onFrame )
+bool CaptureEngine::TakeFrame( const FrameCallback& onFrame )
 {
 	int width, height;
 	{
@@ -596,7 +601,7 @@ bool WgcCapture::TakeFrame( const FrameCallback& onFrame )
 	return true;
 }
 
-std::string WgcCapture::TakeError()
+std::string CaptureEngine::TakeError()
 {
 	std::lock_guard< std::mutex > lock( impl->mutex );
 	std::string error;

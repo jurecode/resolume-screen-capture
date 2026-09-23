@@ -1,5 +1,5 @@
 #pragma once
-#include <windows.h>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -13,26 +13,22 @@ struct CaptureTarget
 		Window
 	};
 
-	Kind kind        = Kind::None;
-	HMONITOR monitor = nullptr;
-	HWND window      = nullptr;
+	Kind kind   = Kind::None;
+	uint64_t id = 0;       // Windows: HMONITOR / HWND. macOS: CGDirectDisplayID / CGWindowID.
 	std::string label;     // UTF-8 text shown in Resolume's dropdown.
-	std::wstring searchKey;// Lowercase label + full title + exe name, used by "Buscar ventana".
+	std::string searchKey; // Lowercase label + full title + program name, used by "Buscar ventana".
 
 	bool SameAs( const CaptureTarget& other ) const
 	{
-		return kind == other.kind && monitor == other.monitor && window == other.window;
+		return kind == other.kind && id == other.id;
 	}
 };
 
-// Returns "(ninguna)" first, then every monitor, then every capturable window.
+// Returns "(ninguna)" first, then every monitor, then every capturable window. (Per platform.)
 std::vector< CaptureTarget > EnumerateCaptureTargets();
 
-// False when the window was closed or the monitor was unplugged.
+// False when the window was closed or the monitor was unplugged. (Per platform.)
 bool IsTargetAlive( const CaptureTarget& target );
 
 // Index of the first target whose searchKey contains the text (case-insensitive), or -1.
 int FindTarget( const std::vector< CaptureTarget >& targets, const std::string& utf8Text );
-
-std::string ToUtf8( const std::wstring& text );
-std::wstring FromUtf8( const std::string& text );

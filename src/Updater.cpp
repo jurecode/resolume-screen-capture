@@ -1,15 +1,11 @@
 #include "Updater.h"
-#include "CaptureTargets.h"//ToUtf8 / FromUtf8
+#include "Platform.h"
 #include "UpdateDialog.h"
 
-#include <windows.h>
-#include <bcrypt.h>
-#include <shellapi.h>
-#include <winhttp.h>
-
+#include <cctype>
 #include <chrono>
 #include <condition_variable>
-#include <cstdio>
+#include <cstdlib>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -26,35 +22,6 @@ namespace
 const std::chrono::seconds FIRST_CHECK_DELAY( 20 );//Don't compete with Resolume while it starts up.
 const std::chrono::hours CHECK_INTERVAL( 6 );
 const std::chrono::hours REMIND_LATER( 24 );
-const size_t MAX_DOWNLOAD_BYTES = 64 * 1024 * 1024;
-const wchar_t REGISTRY_KEY[]    = L"Software\\ResolumeScreenCapture";
-
-// ---------------------------------------------------------------------------------------------
-// Small helpers
-
-std::wstring ModulePath()
-{
-	HMODULE module = nullptr;
-	GetModuleHandleExW( GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-	                    reinterpret_cast< LPCWSTR >( &ModulePath ), &module );
-	std::wstring path( 2048, L'\0' );
-	DWORD length = GetModuleFileNameW( module, &path[ 0 ], static_cast< DWORD >( path.size() ) );
-	path.resize( length );
-	return path;
-}
-
-HMODULE PinnedModule()
-{
-	//Keep our dll loaded until the process exits, so the background thread can never run
-	//code that was unloaded underneath it.
-	static HMODULE module = [] {
-		HMODULE handle = nullptr;
-		GetModuleHandleExW( GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
-		                    reinterpret_cast< LPCWSTR >( &ModulePath ), &handle );
-		return handle;
-	}();
-	return module;
-}
 
 std::vector< int > ParseVersion( std::string text )
 {
@@ -86,6 +53,23 @@ bool IsNewer( const std::string& candidate, const std::string& current )
 	a.resize( count, 0 );
 	b.resize( count, 0 );
 	return a > b;
+}
+
+void AppendUtf8( std::string& out, unsigned int codePoint )
+{
+	if( codePoint < 0x80 )
+		out += static_cast< char >( codePoint );
+	else if( codePoint < 0x800 )
+	{
+		out += static_cast< char >( 0xC0 | ( codePoint >> 6 ) );
+		out += static_cast< char >( 0x80 | ( codePoint & 0x3F ) );
+	}
+	else
+	{
+		out += static_cast< char >( 0xE0 | ( codePoint >> 12 ) );
+		out += static_cast< char >( 0x80 | ( ( codePoint >> 6 ) & 0x3F ) );
+		out += static_cast< char >( 0x80 | ( codePoint & 0x3F ) );
+	}
 }
 
 // Reads a string field from the flat JSON manifest we generate ourselves.
@@ -122,8 +106,7 @@ std::string JsonString( const std::string& json, const char* key )
 		case 'u':
 			if( pos + 4 < json.size() )
 			{
-				wchar_t character = static_cast< wchar_t >( strtoul( json.substr( pos + 1, 4 ).c_str(), nullptr, 16 ) );
-				value += ToUtf8( std::wstring( 1, character ) );
+				AppendUtf8( value, static_cast< unsigned int >( strtoul( json.substr( pos + 1, 4 ).c_str(), nullptr, 16 ) ) );
 				pos += 4;
 			}
 			break;
@@ -133,28 +116,6 @@ std::string JsonString( const std::string& json, const char* key )
 	return {};
 }
 
-std::string Sha256Hex( const std::string& data )
-{
-	UCHAR hash[ 32 ] = {};
-	BCRYPT_ALG_HANDLE algorithm = nullptr;
-	if( !BCRYPT_SUCCESS( BCryptOpenAlgorithmProvider( &algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0 ) ) )
-		return {};
-	NTSTATUS result = BCryptHash( algorithm, nullptr, 0, reinterpret_cast< PUCHAR >( const_cast< char* >( data.data() ) ),
-	                              static_cast< ULONG >( data.size() ), hash, sizeof( hash ) );
-	BCryptCloseAlgorithmProvider( algorithm, 0 );
-	if( !BCRYPT_SUCCESS( result ) )
-		return {};
-
-	std::string hex;
-	char byte[ 3 ];
-	for( UCHAR value : hash )
-	{
-		snprintf( byte, sizeof( byte ), "%02x", value );
-		hex += byte;
-	}
-	return hex;
-}
-
 std::string Lowercase( std::string text )
 {
 	for( char& c : text )
@@ -162,169 +123,9 @@ std::string Lowercase( std::string text )
 	return text;
 }
 
-// ---------------------------------------------------------------------------------------------
-// HTTPS download with WinHTTP (built into Windows, follows GitHub's redirects).
-
-struct InternetHandle
-{
-	HINTERNET handle = nullptr;
-	InternetHandle( HINTERNET h ) :
-		handle( h )
-	{
-	}
-	~InternetHandle()
-	{
-		if( handle )
-			WinHttpCloseHandle( handle );
-	}
-	operator HINTERNET() const
-	{
-		return handle;
-	}
-};
-
-bool HttpsGet( const std::string& url, std::string& body, std::string& error )
-{
-	std::wstring wideUrl = FromUtf8( url );
-	wchar_t host[ 256 ];
-	std::vector< wchar_t > path( 4096 );
-	URL_COMPONENTS parts{};
-	parts.dwStructSize     = sizeof( parts );
-	parts.lpszHostName     = host;
-	parts.dwHostNameLength = ARRAYSIZE( host );
-	parts.lpszUrlPath      = path.data();
-	parts.dwUrlPathLength  = static_cast< DWORD >( path.size() );
-	if( !WinHttpCrackUrl( wideUrl.c_str(), 0, 0, &parts ) )
-	{
-		error = "URL invalida: " + url;
-		return false;
-	}
-	if( parts.nScheme != INTERNET_SCHEME_HTTPS )
-	{
-		error = "Solo se permiten URLs https";
-		return false;
-	}
-
-	std::wstring agent = L"ResolumeScreenCapture/" + FromUtf8( PLUGIN_VERSION_STRING );
-	InternetHandle session( WinHttpOpen( agent.c_str(), WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0 ) );
-	if( !session )
-	{
-		error = "No se pudo iniciar WinHTTP";
-		return false;
-	}
-	WinHttpSetTimeouts( session, 10000, 10000, 15000, 60000 );
-
-	InternetHandle connection( WinHttpConnect( session, host, parts.nPort, 0 ) );
-	InternetHandle request( connection ? WinHttpOpenRequest( connection, L"GET", path.data(), nullptr, WINHTTP_NO_REFERER,
-	                                                         WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE )
-	                                   : nullptr );
-	const wchar_t headers[] = L"Cache-Control: no-cache\r\n";
-	if( !request ||
-	    !WinHttpSendRequest( request, headers, static_cast< DWORD >( -1L ), WINHTTP_NO_REQUEST_DATA, 0, 0, 0 ) ||
-	    !WinHttpReceiveResponse( request, nullptr ) )
-	{
-		error = "Sin conexion con el servidor de actualizaciones (error " + std::to_string( GetLastError() ) + ")";
-		return false;
-	}
-
-	DWORD statusCode = 0;
-	DWORD size       = sizeof( statusCode );
-	WinHttpQueryHeaders( request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX,
-	                     &statusCode, &size, WINHTTP_NO_HEADER_INDEX );
-	if( statusCode != 200 )
-	{
-		error = "El servidor respondio HTTP " + std::to_string( statusCode );
-		return false;
-	}
-
-	body.clear();
-	std::vector< char > buffer( 64 * 1024 );
-	for( ;; )
-	{
-		DWORD read = 0;
-		if( !WinHttpReadData( request, buffer.data(), static_cast< DWORD >( buffer.size() ), &read ) )
-		{
-			error = "La descarga se corto";
-			return false;
-		}
-		if( read == 0 )
-			return true;
-		body.append( buffer.data(), read );
-		if( body.size() > MAX_DOWNLOAD_BYTES )
-		{
-			error = "Archivo demasiado grande";
-			return false;
-		}
-	}
-}
-
-// ---------------------------------------------------------------------------------------------
-// User choices ("later" / "skip") survive Resolume restarts in the registry.
-
-std::string ReadRegistryString( const wchar_t* name )
-{
-	wchar_t value[ 128 ] = {};
-	DWORD size           = sizeof( value );
-	if( RegGetValueW( HKEY_CURRENT_USER, REGISTRY_KEY, name, RRF_RT_REG_SZ, nullptr, value, &size ) != ERROR_SUCCESS )
-		return {};
-	return ToUtf8( value );
-}
-
-void WriteRegistryString( const wchar_t* name, const std::string& value )
-{
-	std::wstring wide = FromUtf8( value );
-	RegSetKeyValueW( HKEY_CURRENT_USER, REGISTRY_KEY, name, REG_SZ, wide.c_str(), static_cast< DWORD >( ( wide.size() + 1 ) * sizeof( wchar_t ) ) );
-}
-
 long long UnixNow()
 {
 	return std::chrono::duration_cast< std::chrono::seconds >( std::chrono::system_clock::now().time_since_epoch() ).count();
-}
-
-// ---------------------------------------------------------------------------------------------
-// Windows notification (bottom-right toast). It doesn't take focus or cover the projector output,
-// and Windows holds it back while a fullscreen app is running.
-
-void ShowNotification( std::string title, std::string text )
-{
-	std::thread( [ title, text ] {
-		HINSTANCE instance        = PinnedModule();
-		const wchar_t className[] = L"ResolumeScreenCaptureNotifier";
-		WNDCLASSW windowClass{};
-		windowClass.lpfnWndProc   = DefWindowProcW;
-		windowClass.hInstance     = instance;
-		windowClass.lpszClassName = className;
-		RegisterClassW( &windowClass );//Fails harmlessly if already registered.
-
-		HWND window = CreateWindowExW( 0, className, L"", 0, 0, 0, 0, 0, nullptr, nullptr, instance, nullptr );
-		if( !window )
-			return;
-
-		NOTIFYICONDATAW icon{};
-		icon.cbSize      = sizeof( icon );
-		icon.hWnd        = window;
-		icon.uID         = 1;
-		icon.uFlags      = NIF_ICON | NIF_TIP | NIF_INFO;
-		icon.hIcon       = LoadIconW( nullptr, MAKEINTRESOURCEW( 32516 ) );//IDI_INFORMATION
-		icon.dwInfoFlags = NIIF_INFO;
-		wcsncpy_s( icon.szTip, L"Captura Pantalla (Resolume)", _TRUNCATE );
-		wcsncpy_s( icon.szInfoTitle, FromUtf8( title ).c_str(), _TRUNCATE );
-		wcsncpy_s( icon.szInfo, FromUtf8( text ).c_str(), _TRUNCATE );
-		Shell_NotifyIconW( NIM_ADD, &icon );
-
-		//Keep the tray icon alive long enough for the notification to be seen.
-		SetTimer( window, 1, 15000, nullptr );
-		MSG message;
-		while( GetMessageW( &message, nullptr, 0, 0 ) > 0 )
-		{
-			if( message.message == WM_TIMER )
-				break;
-			DispatchMessageW( &message );
-		}
-
-		Shell_NotifyIconW( NIM_DELETE, &icon );
-		DestroyWindow( window );
-	} ).detach();
 }
 }// namespace
 
@@ -356,16 +157,15 @@ struct Updater::Impl
 
 	bool IsPostponed( const std::string& version )
 	{
-		if( ReadRegistryString( L"SkipVersion" ) == version )
+		if( platform::ReadSetting( "SkipVersion" ) == version )
 			return true;
-		std::string remindAfter = ReadRegistryString( L"RemindAfter" );
+		std::string remindAfter = platform::ReadSetting( "RemindAfter" );
 		return !remindAfter.empty() && UnixNow() < atoll( remindAfter.c_str() );
 	}
 
 	void Run()
 	{
-		//Leftover from the previous update, no longer loaded now.
-		DeleteFileW( ( ModulePath() + L".old" ).c_str() );
+		platform::CleanupPreviousUpdate();
 
 		auto nextCheck = std::chrono::steady_clock::now() + FIRST_CHECK_DELAY;
 		for( ;; )
@@ -396,15 +196,18 @@ struct Updater::Impl
 		}
 
 		std::string manifest, error;
-		bool ok = HttpsGet( UPDATE_MANIFEST_URL, manifest, error );
+		bool ok = platform::HttpsGet( UPDATE_MANIFEST_URL, manifest, error );
 		std::string version = JsonString( manifest, "version" );
 		if( ok && version.empty() )
 		{
 			ok    = false;
 			error = "El manifiesto de actualizacion no tiene 'version'";
 		}
+		//An older release may only have been published for the other platform.
+		if( ok && JsonString( manifest, platform::UPDATE_URL_KEY ).empty() )
+			version = PLUGIN_VERSION_STRING;
 
-		bool alert = false;
+		bool alert      = false;
 		bool showWindow = false;
 		std::string notes, currentVersion;
 		{
@@ -430,8 +233,8 @@ struct Updater::Impl
 			status.latestVersion = version;
 			status.notes         = JsonString( manifest, "notes" );
 			notes                = status.notes;
-			downloadUrl          = JsonString( manifest, "url" );
-			downloadSha256       = Lowercase( JsonString( manifest, "sha256" ) );
+			downloadUrl          = JsonString( manifest, platform::UPDATE_URL_KEY );
+			downloadSha256       = Lowercase( JsonString( manifest, platform::UPDATE_SHA256_KEY ) );
 			if( IsPostponed( version ) )
 			{
 				SetState( State::Postponed );
@@ -451,7 +254,7 @@ struct Updater::Impl
 			std::string text = "Abre un clip de Captura Pantalla en Arena para instalarla.";
 			if( !notes.empty() )
 				text = notes.substr( 0, 180 ) + "\n" + text;
-			ShowNotification( "Actualizacion disponible: v" + version, text );
+			platform::ShowNotification( "Actualizacion disponible: v" + version, text );
 		}
 	}
 
@@ -469,63 +272,32 @@ struct Updater::Impl
 		}
 
 		std::string error = InstallFrom( url, expectedHash );
-
-		std::lock_guard< std::mutex > lock( mutex );
-		if( !error.empty() )
 		{
-			status.error = error;
-			SetState( State::Failed );
-			return;
+			std::lock_guard< std::mutex > lock( mutex );
+			if( !error.empty() )
+			{
+				status.error = error;
+				SetState( State::Failed );
+				return;
+			}
+			status.error.clear();
+			SetState( State::Installed );
 		}
-		status.error.clear();
-		SetState( State::Installed );
-		ShowNotification( "v" + version + " instalada", "Reinicia Resolume Arena para usar la nueva version." );
+		platform::ShowNotification( "v" + version + " instalada", "Reinicia Resolume Arena para usar la nueva version." );
 	}
 
 	// Returns an empty string on success.
 	static std::string InstallFrom( const std::string& url, const std::string& expectedHash )
 	{
 		if( url.empty() || expectedHash.size() != 64 )
-			return "El manifiesto no tiene 'url' o 'sha256'";
+			return "El manifiesto no tiene la descarga para este sistema";
 
-		std::string dll, error;
-		if( !HttpsGet( url, dll, error ) )
+		std::string package, error;
+		if( !platform::HttpsGet( url, package, error ) )
 			return error;
-		if( Sha256Hex( dll ) != expectedHash )
+		if( platform::Sha256Hex( package ) != expectedHash )
 			return "El archivo descargado no coincide con su sha256; no se instalo";
-		if( dll.size() < 2 || dll[ 0 ] != 'M' || dll[ 1 ] != 'Z' )
-			return "El archivo descargado no es un dll";
-
-		std::wstring current = ModulePath();
-		std::wstring fresh   = current + L".new";
-		std::wstring old     = current + L".old";
-
-		HANDLE file = CreateFileW( fresh.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr );
-		if( file == INVALID_HANDLE_VALUE )
-			return "No se puede escribir en la carpeta del plugin";
-		DWORD written = 0;
-		BOOL wrote    = WriteFile( file, dll.data(), static_cast< DWORD >( dll.size() ), &written, nullptr );
-		CloseHandle( file );
-		if( !wrote || written != dll.size() )
-		{
-			DeleteFileW( fresh.c_str() );
-			return "No se pudo guardar la actualizacion";
-		}
-
-		//Windows won't let us overwrite a loaded dll, but it does let us rename it.
-		DeleteFileW( old.c_str() );
-		if( !MoveFileExW( current.c_str(), old.c_str(), MOVEFILE_REPLACE_EXISTING ) )
-		{
-			DeleteFileW( fresh.c_str() );
-			return "No se pudo apartar la version actual del plugin";
-		}
-		if( !MoveFileExW( fresh.c_str(), current.c_str(), MOVEFILE_REPLACE_EXISTING ) )
-		{
-			MoveFileExW( old.c_str(), current.c_str(), MOVEFILE_REPLACE_EXISTING );
-			DeleteFileW( fresh.c_str() );
-			return "No se pudo colocar la nueva version del plugin";
-		}
-		return {};
+		return platform::InstallUpdate( package );
 	}
 };
 
@@ -545,7 +317,7 @@ void Updater::Start()
 		if( std::string( UPDATE_MANIFEST_URL ).empty() )
 			return;//Local builds without a manifest URL never update.
 
-		PinnedModule();
+		platform::KeepPluginLoaded();
 		impl->status.state = State::UpToDate;
 		++impl->status.revision;
 		Impl* state = impl;
@@ -590,7 +362,7 @@ void Updater::RemindLater()
 	if( impl->status.state != State::Available )
 		return;
 	auto later = UnixNow() + std::chrono::duration_cast< std::chrono::seconds >( REMIND_LATER ).count();
-	WriteRegistryString( L"RemindAfter", std::to_string( later ) );
+	platform::WriteSetting( "RemindAfter", std::to_string( later ) );
 	impl->SetState( State::Postponed );
 }
 
@@ -601,6 +373,6 @@ void Updater::SkipVersion()
 	std::lock_guard< std::mutex > lock( impl->mutex );
 	if( impl->status.state != State::Available )
 		return;
-	WriteRegistryString( L"SkipVersion", impl->status.latestVersion );
+	platform::WriteSetting( "SkipVersion", impl->status.latestVersion );
 	impl->SetState( State::Postponed );
 }

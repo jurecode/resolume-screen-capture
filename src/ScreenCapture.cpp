@@ -116,6 +116,9 @@ ScreenCapture::ScreenCapture()
 
 	SetParamInfo( PT_CURSOR, "Mostrar cursor", FF_TYPE_BOOLEAN, showCursor );
 	SetParamInfo( PT_RESTORE_MINIMIZED, "Restaurar si se minimiza", FF_TYPE_BOOLEAN, restoreMinimized );
+#ifdef __APPLE__
+	SetParamVisibility( PT_RESTORE_MINIMIZED, false, false );//macOS keeps the last image instead.
+#endif
 
 	SetParamInfo( PT_CROP_LEFT, "Izquierda", FF_TYPE_STANDARD, 0.0f );
 	SetParamInfo( PT_CROP_RIGHT, "Derecha", FF_TYPE_STANDARD, 0.0f );
@@ -135,9 +138,13 @@ ScreenCapture::ScreenCapture()
 
 FFResult ScreenCapture::InitGL( const FFGLViewportStruct* vp )
 {
-	if( !WgcCapture::IsSupported() )
+	if( !CaptureEngine::IsSupported() )
 	{
+#ifdef __APPLE__
+		Log( "La captura necesita macOS 12.3 o superior." );
+#else
 		Log( "Windows Graphics Capture no esta disponible. Se necesita Windows 10 (1903) o superior." );
+#endif
 		return FF_FAIL;
 	}
 	if( !shader.Compile( vertexShaderCode, fragmentShaderCode ) || !quad.Initialise() )
@@ -148,6 +155,7 @@ FFResult ScreenCapture::InitGL( const FFGLViewportStruct* vp )
 
 	static std::once_flag logVersionOnce;
 	std::call_once( logVersionOnce, [] { LogToFile( "Captura Pantalla v" PLUGIN_VERSION_STRING " cargado" ); } );
+	CaptureEngine::HasPermission();//On macOS this asks for Screen Recording the first time.
 
 	glGenTextures( 1, &texture );
 	{

@@ -1,15 +1,25 @@
-# Captura Pantalla: plugin FFGL para Resolume Arena 7 (Windows)
+# Captura Pantalla: plugin FFGL para Resolume Arena 7 (Windows y Mac)
 
-Este plugin es una **fuente** (source) de Resolume. Muestra en vivo una **pantalla completa** o **una ventana** de Windows, por ejemplo PowerPoint, Chrome o Keynote Viewer. No necesita OBS, NDI ni Spout.
+Este plugin es una **fuente** (source) de Resolume. Muestra en vivo una **pantalla completa** o **una ventana**, por ejemplo PowerPoint, Chrome o Keynote. No necesita OBS, NDI, Spout ni Syphon.
 
-Usa **Windows Graphics Capture**, la misma API que usa la herramienta Recortes de Windows, así que captura bien las ventanas con aceleración por GPU, como los navegadores y los juegos.
+En Windows usa **Windows Graphics Capture**, la misma API que usa la herramienta Recortes. En Mac usa **ScreenCaptureKit**, la API de captura de Apple. Las dos capturan bien las ventanas con aceleración por GPU, como los navegadores y los juegos.
 
 ## Requisitos
-- Windows 10 versión 1903 o superior. Se recomienda Windows 11: ahí se oculta el borde amarillo de captura.
-- Resolume Arena o Avenue 7.x de 64 bits (probado para 7.18.2).
+- **Windows:** Windows 10 versión 1903 o superior. Se recomienda Windows 11: ahí se oculta el borde amarillo de captura.
+- **Mac:** macOS 12.3 o superior. Un solo plugin sirve para chips Apple (M1 a M4) e Intel.
+- Resolume Arena o Avenue **7.x** (hecho para 7.18.2). Arena 6 no carga este tipo de plugins.
 - Para compilar: **Visual Studio 2022** (la edición Community es gratis) con la carga de trabajo **"Desarrollo para el escritorio con C++"**. Esa carga de trabajo ya incluye CMake y el Windows SDK.
 
-## Compilar e instalar
+## Instalar en Mac
+1. Descarga **`ScreenCapture-mac.zip`** de la pestaña **Releases** y ábrelo con doble clic. Aparece **`ScreenCapture.bundle`**.
+2. Cierra Arena y copia `ScreenCapture.bundle` en `Documentos/Resolume Arena/Extra Effects`.
+3. Abre Arena. La primera vez, macOS pide el permiso de **Grabación de pantalla** para Arena. Actívalo en *Ajustes del Sistema → Privacidad y seguridad → Grabación de pantalla y audio del sistema* y reinicia Arena.
+4. Si macOS dice que no puede verificar el desarrollador, abre Terminal y ejecuta:
+   `xattr -dr com.apple.quarantine ~/Documents/"Resolume Arena"/"Extra Effects"/ScreenCapture.bundle`
+
+En Mac, *Restaurar si se minimiza* no aparece. macOS tampoco dibuja las ventanas minimizadas, así que Arena se queda con la última imagen.
+
+## Compilar e instalar en Windows
 1. Copia la carpeta `ScreenCapture` al PC con Windows.
 2. Haz doble clic en `build.bat`. Si dice que no encuentra `cmake`, ábrelo desde **"Developer Command Prompt for VS 2022"**.
 3. El script compila `build\Release\ScreenCapture.dll` y lo copia a `Documentos\Resolume Arena\Extra Effects`.
@@ -54,7 +64,7 @@ git commit -am "Descripción del cambio"
 git tag -a v1.1.0 -m "Texto que verán los usuarios en el aviso"
 git push origin main v1.1.0
 ```
-El workflow `release.yml` compila el plugin con esa versión y crea un Release con `ScreenCapture.dll` y `latest.json` (versión, URL, SHA-256 y notas). Los plugins instalados leen siempre `releases/latest/download/latest.json`.
+El workflow `release.yml` compila el plugin para Windows y Mac con esa versión y crea un Release con `ScreenCapture.dll`, `ScreenCapture-mac.zip` y `latest.json` (versión, URLs, SHA-256 y notas). Los plugins instalados leen siempre `releases/latest/download/latest.json`.
 
 **Importante:** el primer `.dll` que instales a mano tiene que salir de un Release (de la pestaña Releases, no de `build.bat`). Las compilaciones locales no tienen la dirección de actualización y no buscan versiones nuevas. Para probar localmente con actualizaciones:
 ```bash
@@ -73,11 +83,14 @@ cmake -S . -B build -A x64 -DPLUGIN_VERSION=1.0.0 -DUPDATE_MANIFEST_URL=https://
 
 ## Estructura
 ```
-src/ScreenCapture.*    Plugin FFGL: parámetros, shader y dibujo
-src/WgcCapture.*       Captura con Windows Graphics Capture + Direct3D 11
-src/CaptureTargets.*   Lista de pantallas y ventanas
-src/Updater.*          Actualizaciones remotas (WinHTTP + SHA-256 + notificación)
-.github/workflows/     build.yml (compilación de prueba) y release.yml (publicar actualización)
+src/ScreenCapture.*    Plugin FFGL: parámetros, shader y dibujo (común)
+src/CaptureEngine.h    Interfaz de captura
+src/CaptureTargets.*   Lista de pantallas y ventanas (búsqueda común)
+src/Updater.*          Lógica de actualizaciones remotas (común)
+src/Platform.h         Lo que cada sistema aporta: descargas, ajustes, instalar
+src/win/               Windows: Windows Graphics Capture, WinHTTP, ventana Win32
+src/mac/               Mac: ScreenCaptureKit, NSURLSession, ventana AppKit
+.github/workflows/     build.yml (compilación de prueba) y release.yml (publica Windows + Mac)
 third_party/ffgl       SDK FFGL oficial de Resolume (github.com/resolume/ffgl)
 third_party/glew-2.1.0 GLEW, que usa el SDK en Windows
 ```

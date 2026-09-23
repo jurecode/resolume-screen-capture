@@ -5,23 +5,26 @@
 #include <string>
 #include <thread>
 
-// Captures a monitor or a window with Windows.Graphics.Capture (Windows 10 1903 or newer).
+// Captures a monitor or a window. Windows: Windows.Graphics.Capture (win/CaptureEngineWin.cpp).
+// macOS: ScreenCaptureKit (mac/CaptureEngineMac.mm).
 //
-// All the capture work (WinRT, Direct3D, copying frames from the GPU) runs on a private thread.
-// Resolume's render thread never waits on Windows: Start/Stop return immediately and
-// TakeFrame only picks up the newest frame that is already finished.
-class WgcCapture
+// All the capture work runs off Resolume's thread (a private thread on Windows, ScreenCaptureKit's
+// own queues on macOS). Resolume's render thread never waits on the system: Start/Stop return
+// immediately and TakeFrame only picks up the newest frame that is already finished.
+class CaptureEngine
 {
 public:
 	// bgra points at `height` tightly packed rows of `width` BGRA pixels, valid during the callback.
 	using FrameCallback = std::function< void( const unsigned char* bgra, int width, int height ) >;
 
-	WgcCapture();
-	~WgcCapture();
-	WgcCapture( const WgcCapture& ) = delete;
-	WgcCapture& operator=( const WgcCapture& ) = delete;
+	CaptureEngine();
+	~CaptureEngine();
+	CaptureEngine( const CaptureEngine& ) = delete;
+	CaptureEngine& operator=( const CaptureEngine& ) = delete;
 
 	static bool IsSupported();
+	// macOS asks the user for the Screen Recording permission the first time. Windows needs none.
+	static bool HasPermission();
 
 	void Start( const CaptureTarget& target, bool showCursor );
 	void Stop();
@@ -40,5 +43,5 @@ public:
 private:
 	struct Impl;
 	std::shared_ptr< Impl > impl;
-	std::thread worker;
+	std::thread worker;//Windows only.
 };

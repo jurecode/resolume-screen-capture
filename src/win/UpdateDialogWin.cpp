@@ -1,6 +1,6 @@
-#include "UpdateDialog.h"
-#include "CaptureTargets.h"//FromUtf8
-#include "Updater.h"
+#include "../UpdateDialog.h"
+#include "../Platform.h"
+#include "../Updater.h"
 
 #include <windows.h>
 #include <atomic>
