@@ -1,0 +1,60 @@
+# Publishes an update: push a tag like v1.2.0 and every installed plugin will find it.
+#
+#   git tag -a v1.2.0 -m "Arreglado el recorte en pantallas 4K"
+#   git push origin v1.2.0
+#
+# The tag message becomes the notes shown in the update alert.
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read version and notes from the tag
+        id: meta
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          git fetch --force origin "refs/tags/${tag}:refs/tags/${tag}"
+          $notes = (git tag -l --format='%(contents)' $tag | Out-String).Trim()
+          if (-not $notes) { $notes = (git log -1 --format=%s).Trim() }
+          "version=$($tag.TrimStart('v'))" >> $env:GITHUB_OUTPUT
+          $notes | Set-Content -Encoding utf8 notes.txt
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+          -DPLUGIN_VERSION=${{ steps.meta.outputs.version }}
+          -DUPDATE_MANIFEST_URL=https://github.com/${{ github.repository }}/releases/latest/download/latest.json
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Write update manifest
+        shell: pwsh
+        run: |
+          $dll = "build/Release/ScreenCapture.dll"
+          $manifest = [ordered]@{
+            version = "${{ steps.meta.outputs.version }}"
+            url     = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/ScreenCapture.dll"
+            sha256  = (Get-FileHash $dll -Algorithm SHA256).Hash.ToLower()
+            notes   = (Get-Content notes.txt -Raw).Trim()
+          }
+          $manifest | ConvertTo-Json | Set-Content -Encoding utf8NoBOM latest.json
+          Get-Content latest.json
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" build/Release/ScreenCapture.dll latest.json --title "${{ github.ref_name }}" --notes-file notes.txt
