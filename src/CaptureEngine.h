@@ -30,6 +30,11 @@ public:
 	void Stop();
 	void SetCursorVisible( bool visible );
 	void SetRestoreMinimized( bool restore );//Show a minimized captured window again, behind all others.
+	void SetContentOnly( bool enabled );     //Windows: follow just the photo/video inside the window.
+
+	// With SetContentOnly: where the photo/video is, as x0, y0, x1, y1 fractions of the frame
+	// (top-left origin). False: show the whole frame.
+	bool GetContentRect( float rect[ 4 ] ) const;
 
 	bool IsActive() const; //Starting or capturing.
 	bool WasClosed() const;//The captured window was closed or the monitor was disconnected.

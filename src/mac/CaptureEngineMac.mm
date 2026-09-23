@@ -377,6 +377,16 @@ void CaptureEngine::SetRestoreMinimized( bool )
 	//Accessibility permission. The last image stays on screen instead (idle frames are skipped).
 }
 
+void CaptureEngine::SetContentOnly( bool )
+{
+	//Windows only for now (it relies on UI Automation).
+}
+
+bool CaptureEngine::GetContentRect( float[ 4 ] ) const
+{
+	return false;
+}
+
 bool CaptureEngine::IsActive() const
 {
 	Phase phase = impl->state->phase;

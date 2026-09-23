@@ -14,6 +14,7 @@ enum ParamType : FFUInt32
 	PT_FIT,
 	PT_CURSOR,
 	PT_RESTORE_MINIMIZED,
+	PT_CONTENT_ONLY,
 	PT_CROP_LEFT,
 	PT_CROP_RIGHT,
 	PT_CROP_TOP,
@@ -116,8 +117,10 @@ ScreenCapture::ScreenCapture()
 
 	SetParamInfo( PT_CURSOR, "Mostrar cursor", FF_TYPE_BOOLEAN, showCursor );
 	SetParamInfo( PT_RESTORE_MINIMIZED, "Restaurar si se minimiza", FF_TYPE_BOOLEAN, restoreMinimized );
+	SetParamInfo( PT_CONTENT_ONLY, "Solo contenido", FF_TYPE_BOOLEAN, contentOnly );
 #ifdef __APPLE__
 	SetParamVisibility( PT_RESTORE_MINIMIZED, false, false );//macOS keeps the last image instead.
+	SetParamVisibility( PT_CONTENT_ONLY, false, false );     //Windows only for now.
 #endif
 
 	SetParamInfo( PT_CROP_LEFT, "Izquierda", FF_TYPE_STANDARD, 0.0f );
@@ -227,10 +230,17 @@ FFResult ScreenCapture::ProcessOpenGL( ProcessOpenGLStruct* pGL )
 		UploadFrame( bgra, width, height );
 	} );
 
-	float x0 = crop[ 0 ] * MAX_CROP;
-	float x1 = 1.0f - crop[ 1 ] * MAX_CROP;
-	float y0 = crop[ 2 ] * MAX_CROP;
-	float y1 = 1.0f - crop[ 3 ] * MAX_CROP;
+	//"Solo contenido" narrows the image to the photo/video first; the crop sliders then work
+	//inside that area.
+	float area[ 4 ] = { 0.0f, 0.0f, 1.0f, 1.0f };
+	if( contentOnly )
+		capture.GetContentRect( area );
+	float areaWidth  = area[ 2 ] - area[ 0 ];
+	float areaHeight = area[ 3 ] - area[ 1 ];
+	float x0         = area[ 0 ] + areaWidth * crop[ 0 ] * MAX_CROP;
+	float x1         = area[ 2 ] - areaWidth * crop[ 1 ] * MAX_CROP;
+	float y0         = area[ 1 ] + areaHeight * crop[ 2 ] * MAX_CROP;
+	float y1         = area[ 3 ] - areaHeight * crop[ 3 ] * MAX_CROP;
 
 	float scaleX = 1.0f;
 	float scaleY = 1.0f;
@@ -441,6 +451,10 @@ FFResult ScreenCapture::SetFloatParameter( unsigned int index, float value )
 		restoreMinimized = value > 0.5f;
 		capture.SetRestoreMinimized( restoreMinimized );
 		break;
+	case PT_CONTENT_ONLY:
+		contentOnly = value > 0.5f;
+		capture.SetContentOnly( contentOnly );
+		break;
 	case PT_CROP_LEFT:
 	case PT_CROP_RIGHT:
 	case PT_CROP_TOP:
@@ -479,6 +493,8 @@ float ScreenCapture::GetFloatParameter( unsigned int index )
 		return showCursor ? 1.0f : 0.0f;
 	case PT_RESTORE_MINIMIZED:
 		return restoreMinimized ? 1.0f : 0.0f;
+	case PT_CONTENT_ONLY:
+		return contentOnly ? 1.0f : 0.0f;
 	case PT_CROP_LEFT:
 	case PT_CROP_RIGHT:
 	case PT_CROP_TOP:

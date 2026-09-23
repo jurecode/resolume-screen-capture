@@ -62,6 +62,8 @@ target_compile_definitions(ScreenCapture PRIVATE
 if(WIN32)
     target_sources(ScreenCapture PRIVATE
         src/win/CaptureEngineWin.cpp
+        src/win/ContentDetectorWin.cpp
+        src/win/ContentDetectorWin.h
         src/win/CaptureTargetsWin.cpp
         src/win/PlatformWin.cpp
         src/win/UpdateDialogWin.cpp

@@ -1,5 +1,6 @@
 #include "../CaptureEngine.h"
 #include "../FileLog.h"
+#include "ContentDetectorWin.h"
 
 #include <unknwn.h>
 #include <inspectable.h>
@@ -138,6 +139,7 @@ struct CaptureEngine::Impl
 	uint64_t activeGeneration = 0;
 	bool activeCursor         = true;
 	HWND activeWindow         = nullptr;
+	ContentDetector content;
 	bool wasMinimized         = false;
 	std::chrono::steady_clock::time_point lastMinimizedCheck;
 	std::chrono::steady_clock::time_point lastRestore;
@@ -274,6 +276,7 @@ struct CaptureEngine::Impl
 	void Open( const CaptureTarget& target, bool cursor )
 	{
 		activeWindow  = target.kind == CaptureTarget::Kind::Window ? reinterpret_cast< HWND >( target.id ) : nullptr;
+		content.SetWindow( activeWindow );
 		wasMinimized  = false;
 		activeLabel   = target.label;
 		gotFirstFrame = false;
@@ -365,6 +368,7 @@ struct CaptureEngine::Impl
 		framePool    = nullptr;
 		item         = nullptr;
 		activeWindow = nullptr;
+		content.SetWindow( nullptr );
 	}
 
 	void ApplyCursor( bool cursor )
@@ -562,6 +566,16 @@ void CaptureEngine::SetRestoreMinimized( bool restore )
 		impl->wantedRestore = restore;
 	}
 	SetEvent( impl->wakeEvent );
+}
+
+void CaptureEngine::SetContentOnly( bool enabled )
+{
+	impl->content.SetEnabled( enabled );
+}
+
+bool CaptureEngine::GetContentRect( float rect[ 4 ] ) const
+{
+	return impl->content.GetRect( rect );
 }
 
 void CaptureEngine::SetCursorVisible( bool visible )

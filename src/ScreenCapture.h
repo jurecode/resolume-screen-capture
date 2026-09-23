@@ -38,6 +38,7 @@ private:
 	int fitMode          = 1;
 	bool showCursor      = true;
 	bool restoreMinimized = true;
+	bool contentOnly      = false;
 	float crop[ 4 ]      = { 0.0f, 0.0f, 0.0f, 0.0f };//left, right, top, bottom
 	bool restartRequired = true;
 
