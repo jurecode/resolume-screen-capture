@@ -1,12 +1,15 @@
 #include "../CaptureEngine.h"
 #include "../FileLog.h"
 #include "ContentDetectorWin.h"
+#include "../ContentFinder.h"
 
 #include <unknwn.h>
 #include <inspectable.h>
 #include <d3d11.h>
 #include <dxgi.h>
+#include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -38,6 +41,8 @@ const DWORD IDLE_WAKE_MS                   = 100;
 const DWORD SHUTDOWN_WAIT_MS               = 3000;
 const std::chrono::milliseconds MINIMIZED_CHECK_INTERVAL( 250 );
 const std::chrono::seconds RESTORE_RETRY_INTERVAL( 2 );
+const std::chrono::milliseconds CONTENT_CHECK_INTERVAL( 150 );
+const float CONTENT_RECT_TOLERANCE = 0.005f;//Answers this close count as "the same" (no flicker).
 
 // Lets threads we don't own (Resolume's) make WinRT calls without initializing COM on them.
 void EnsureWinRTUsable()
@@ -119,6 +124,9 @@ struct CaptureEngine::Impl
 	std::string error;
 
 	std::atomic< Phase > phase{ Phase::Idle };
+	std::atomic< bool > contentOnly{ false };
+	bool contentFound         = false;//Guarded by mutex, like contentRect.
+	float contentRect[ 4 ]    = { 0, 0, 1, 1 };
 	std::atomic< bool > itemClosed{ false };
 	HANDLE wakeEvent = CreateEventW( nullptr, FALSE, FALSE, nullptr );
 	HANDLE doneEvent = CreateEventW( nullptr, TRUE, FALSE, nullptr );
@@ -140,6 +148,12 @@ struct CaptureEngine::Impl
 	bool activeCursor         = true;
 	HWND activeWindow         = nullptr;
 	ContentDetector content;
+	std::chrono::steady_clock::time_point lastContentCheck;
+	float contentCandidate[ 4 ] = { 0, 0, 1, 1 };
+	bool contentCandidateValid  = false;
+	int contentCandidateHits    = 0;
+	bool contentPublished       = false;
+	std::string lastContentLog;
 	bool wasMinimized         = false;
 	std::chrono::steady_clock::time_point lastMinimizedCheck;
 	std::chrono::steady_clock::time_point lastRestore;
@@ -277,6 +291,7 @@ struct CaptureEngine::Impl
 	{
 		activeWindow  = target.kind == CaptureTarget::Kind::Window ? reinterpret_cast< HWND >( target.id ) : nullptr;
 		content.SetWindow( activeWindow );
+		ResetContent();
 		wasMinimized  = false;
 		activeLabel   = target.label;
 		gotFirstFrame = false;
@@ -390,6 +405,66 @@ struct CaptureEngine::Impl
 #endif
 	}
 
+	void ResetContent()
+	{
+		contentCandidateValid = false;
+		contentCandidateHits  = 0;
+		contentPublished      = false;
+		std::lock_guard< std::mutex > lock( mutex );
+		contentFound = false;
+	}
+
+	// "Solo contenido": where is the photo/video in this frame? UI Automation (if the app
+	// describes it) narrows the search, then the flat background around it is trimmed away.
+	void UpdateContent( int width, int height )
+	{
+		auto now = std::chrono::steady_clock::now();
+		if( now - lastContentCheck < CONTENT_CHECK_INTERVAL )
+			return;
+		lastContentCheck = now;
+
+		float region[ 4 ]   = { 0, 0, 1, 1 };
+		bool fromAutomation = content.GetRect( region );
+		float trimmed[ 4 ];
+		bool fromPixels      = FindContentInFrame( workPixels.data(), width, height, region, trimmed );
+		const float* answer  = fromPixels ? trimmed : fromAutomation ? region : nullptr;
+
+		//Only switch once the same answer came twice in a row, so a dark video scene can't make
+		//the crop jump around. The very first answer is used right away.
+		bool same = answer != nullptr ? contentCandidateValid && std::equal( answer, answer + 4, contentCandidate, []( float a, float b ) {
+			                                return std::abs( a - b ) <= CONTENT_RECT_TOLERANCE;
+		                                } )
+		                              : !contentCandidateValid;
+		if( answer != nullptr )
+			std::copy( answer, answer + 4, contentCandidate );
+		contentCandidateValid = answer != nullptr;
+		contentCandidateHits  = same ? contentCandidateHits + 1 : 1;
+		if( contentPublished && contentCandidateHits < 2 )
+			return;
+		contentPublished = true;
+		{
+			std::lock_guard< std::mutex > lock( mutex );
+			contentFound = contentCandidateValid;
+			std::copy( contentCandidate, contentCandidate + 4, contentRect );
+		}
+
+		std::string message = "Solo contenido: ventana completa (no hay fondo liso alrededor de una foto o video)";
+		if( contentCandidateValid )
+		{
+			char text[ 160 ];
+			snprintf( text, sizeof( text ), "Solo contenido (%s): x %d..%d  y %d..%d de %dx%d",
+			          fromPixels ? ( fromAutomation ? "UI Automation + fondo" : "fondo liso" ) : "UI Automation",
+			          static_cast< int >( contentCandidate[ 0 ] * width ), static_cast< int >( contentCandidate[ 2 ] * width ),
+			          static_cast< int >( contentCandidate[ 1 ] * height ), static_cast< int >( contentCandidate[ 3 ] * height ), width, height );
+			message = text;
+		}
+		if( message != lastContentLog )
+		{
+			lastContentLog = message;
+			LogToFile( message );
+		}
+	}
+
 	void EnsureStaging( UINT width, UINT height )
 	{
 		if( staging && stagingWidth == width && stagingHeight == height )
@@ -453,6 +528,8 @@ struct CaptureEngine::Impl
 				for( UINT row = 0; row < height; ++row )
 					memcpy( workPixels.data() + row * rowBytes, static_cast< const unsigned char* >( mapped.pData ) + row * mapped.RowPitch, rowBytes );
 				d3dContext->Unmap( staging.get(), 0 );
+				if( contentOnly )
+					UpdateContent( static_cast< int >( width ), static_cast< int >( height ) );
 
 				{
 					std::lock_guard< std::mutex > lock( mutex );
@@ -570,12 +647,18 @@ void CaptureEngine::SetRestoreMinimized( bool restore )
 
 void CaptureEngine::SetContentOnly( bool enabled )
 {
+	impl->contentOnly = enabled;
 	impl->content.SetEnabled( enabled );
+	SetEvent( impl->wakeEvent );
 }
 
 bool CaptureEngine::GetContentRect( float rect[ 4 ] ) const
 {
-	return impl->content.GetRect( rect );
+	std::lock_guard< std::mutex > lock( impl->mutex );
+	if( !impl->contentOnly || !impl->contentFound )
+		return false;
+	std::copy( impl->contentRect, impl->contentRect + 4, rect );
+	return true;
 }
 
 void CaptureEngine::SetCursorVisible( bool visible )

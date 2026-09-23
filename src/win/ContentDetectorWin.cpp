@@ -218,7 +218,7 @@ struct ContentDetector::Impl
 
 		if( best.area < MIN_AREA_FRACTION * width * height )
 		{
-			Report( "Solo contenido: no se encontro foto ni video en esta ventana, se muestra completa" );
+			Report( "Solo contenido: UI Automation no describe la foto/video de esta ventana; se busca por el fondo de la imagen" );
 			DumpTree( target, root.get(), frame );
 			return false;
 		}

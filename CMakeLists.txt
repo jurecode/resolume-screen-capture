@@ -47,6 +47,8 @@ add_library(ScreenCapture MODULE
     src/FileLog.cpp
     src/FileLog.h
     src/Thumbnail.cpp
+    src/ContentFinder.cpp
+    src/ContentFinder.h
     ${FFGL_DIR}/FFGLSDK.cpp
 )
 
