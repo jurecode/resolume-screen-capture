@@ -1,5 +1,6 @@
 #include "Updater.h"
 #include "CaptureTargets.h"//ToUtf8 / FromUtf8
+#include "UpdateDialog.h"
 
 #include <windows.h>
 #include <bcrypt.h>
@@ -345,6 +346,7 @@ struct Updater::Impl
 	std::string downloadUrl;
 	std::string downloadSha256;
 	std::string alertedVersion;//Alert only once per version per Resolume session.
+	bool startupCheck = true;  //The first check after Arena opens gets a window, later ones a notification.
 
 	void SetState( State state )//Caller holds the mutex.
 	{
@@ -403,7 +405,8 @@ struct Updater::Impl
 		}
 
 		bool alert = false;
-		std::string notes;
+		bool showWindow = false;
+		std::string notes, currentVersion;
 		{
 			std::lock_guard< std::mutex > lock( mutex );
 			if( !ok )
@@ -412,6 +415,10 @@ struct Updater::Impl
 				SetState( State::Failed );
 				return;
 			}
+			//A popup in the middle of a show would be bad: only the check right after Arena opens gets one.
+			showWindow     = startupCheck;
+			startupCheck   = false;
+			currentVersion = status.currentVersion;
 
 			status.error.clear();
 			if( !IsNewer( version, status.currentVersion ) )
@@ -435,7 +442,11 @@ struct Updater::Impl
 			alertedVersion = version;
 		}
 
-		if( alert )
+		if( alert && showWindow )
+		{
+			ShowUpdateDialog( currentVersion, version, notes );
+		}
+		else if( alert )
 		{
 			std::string text = "Abre un clip de Captura Pantalla en Arena para instalarla.";
 			if( !notes.empty() )

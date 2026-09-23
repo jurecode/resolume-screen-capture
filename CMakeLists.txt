@@ -36,6 +36,10 @@ add_library(ScreenCapture MODULE
     src/Updater.cpp
     src/FileLog.cpp
     src/FileLog.h
+    src/UpdateDialog.cpp
+    src/UpdateDialog.h
+    src/Thumbnail.cpp
+    src/ScreenCapture.manifest
     src/Updater.h
     ${FFGL_DIR}/FFGLSDK.cpp
 )
@@ -61,6 +65,8 @@ target_link_libraries(ScreenCapture PRIVATE
     winhttp
     bcrypt
     shell32
+    user32
+    gdi32
     ${GLEW_DIR}/lib/Release/x64/glew32s.lib
 )
 
