@@ -7,7 +7,7 @@ En Windows usa **Windows Graphics Capture**, la misma API que usa la herramienta
 ## Requisitos
 - **Windows:** Windows 10 versión 1903 o superior. Se recomienda Windows 11: ahí se oculta el borde amarillo de captura.
 - **Mac:** macOS 12.3 o superior. Un solo plugin sirve para chips Apple (M1 a M4) e Intel.
-- Resolume Arena o Avenue **7.x** (hecho para 7.18.2). Arena 6 no carga este tipo de plugins.
+- Resolume Arena o Avenue **7.x** (hecho para 7.18.2). Para **Arena 6 en Mac** hay una versión aparte (ver abajo).
 - Para compilar: **Visual Studio 2022** (la edición Community es gratis) con la carga de trabajo **"Desarrollo para el escritorio con C++"**. Esa carga de trabajo ya incluye CMake y el Windows SDK.
 
 ## Instalar en Mac
@@ -18,6 +18,15 @@ En Windows usa **Windows Graphics Capture**, la misma API que usa la herramienta
    `xattr -dr com.apple.quarantine ~/Documents/"Resolume Arena"/"Extra Effects"/ScreenCapture.bundle`
 
 En Mac, *Restaurar si se minimiza* no aparece. macOS tampoco dibuja las ventanas minimizadas, así que Arena se queda con la última imagen.
+
+## Versión para Arena 6 (solo Mac)
+Arena 6 usa un sistema de plugins más antiguo (FFGL 1.6), así que tiene su propio archivo: **`ScreenCapture-mac-arena6.zip`**, que trae `ScreenCaptureArena6.bundle`. Se copia en `Documentos/Resolume Arena 6/Extra Effects`.
+
+Arena 6 no tiene menús desplegables, así que la fuente se elige **escribiendo** en el campo **Fuente**:
+- `pantalla 1`, `pantalla 2`… para una pantalla completa.
+- Parte del nombre de un programa o ventana: `chrome`, `keynote`, `powerpoint`, `safari`.
+
+Si no encuentra lo que escribiste, anota en `Documentos/CapturaPantalla-log.txt` la lista de fuentes disponibles. Los demás controles son *Proporcion* (mantener la forma de la imagen), *Mostrar cursor* y los cuatro *Recorte*.
 
 ## Compilar e instalar en Windows
 1. Copia la carpeta `ScreenCapture` al PC con Windows.
@@ -90,7 +99,9 @@ src/Updater.*          Lógica de actualizaciones remotas (común)
 src/Platform.h         Lo que cada sistema aporta: descargas, ajustes, instalar
 src/win/               Windows: Windows Graphics Capture, WinHTTP, ventana Win32
 src/mac/               Mac: ScreenCaptureKit, NSURLSession, ventana AppKit
+src/arena6/            Plugin para Arena 6 (FFGL 1.6), reutiliza la captura de Mac
 .github/workflows/     build.yml (compilación de prueba) y release.yml (publica Windows + Mac)
 third_party/ffgl       SDK FFGL oficial de Resolume (github.com/resolume/ffgl)
 third_party/glew-2.1.0 GLEW, que usa el SDK en Windows
+third_party/ffgl-1.6   SDK FFGL 1.6 de Resolume (2018), para Arena 6
 ```

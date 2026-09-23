@@ -1,0 +1,1 @@
+resolume/ffgl @ d7b1003af6137919a8ce3ced60a64fad011b6ee1 (FFGL 1.6, ultimo SDK para Resolume 6)

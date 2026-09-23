@@ -8,7 +8,11 @@ int FindTarget( const std::vector< CaptureTarget >& targets, const std::string& 
 		return -1;
 
 	//Windows first: "chrome" should find the browser, not a monitor that happens to match.
-	for( CaptureTarget::Kind kind : { CaptureTarget::Kind::Window, CaptureTarget::Kind::Monitor } )
+	//Except for "pantalla 2", which should never pick a web page that mentions "pantalla".
+	bool monitorFirst = needle.compare( 0, 8, "pantalla" ) == 0;
+	CaptureTarget::Kind first  = monitorFirst ? CaptureTarget::Kind::Monitor : CaptureTarget::Kind::Window;
+	CaptureTarget::Kind second = monitorFirst ? CaptureTarget::Kind::Window : CaptureTarget::Kind::Monitor;
+	for( CaptureTarget::Kind kind : { first, second } )
 	{
 		for( size_t index = 0; index < targets.size(); ++index )
 		{

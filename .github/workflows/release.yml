@@ -51,16 +51,21 @@ jobs:
       - name: Build
         run: cmake --build build -j 4
 
-      - name: Sign bundle (ad-hoc) and zip
+      - name: Sign bundles (ad-hoc) and zip
         run: |
-          codesign --force --deep --sign - build/ScreenCapture.bundle
-          codesign --verify --strict build/ScreenCapture.bundle
+          for bundle in ScreenCapture ScreenCaptureArena6; do
+            codesign --force --deep --sign - "build/$bundle.bundle"
+            codesign --verify --strict "build/$bundle.bundle"
+          done
           ditto -c -k --keepParent build/ScreenCapture.bundle ScreenCapture-mac.zip
+          ditto -c -k --keepParent build/ScreenCaptureArena6.bundle ScreenCapture-mac-arena6.zip
 
       - uses: actions/upload-artifact@v4
         with:
           name: mac
-          path: ScreenCapture-mac.zip
+          path: |
+            ScreenCapture-mac.zip
+            ScreenCapture-mac-arena6.zip
 
   publish:
     needs: [windows, mac]
@@ -89,8 +94,10 @@ jobs:
             --arg sha256 "$(sha256sum dist/ScreenCapture.dll | cut -d' ' -f1)" \
             --arg url_mac "$base/ScreenCapture-mac.zip" \
             --arg sha256_mac "$(sha256sum dist/ScreenCapture-mac.zip | cut -d' ' -f1)" \
+            --arg url_mac_arena6 "$base/ScreenCapture-mac-arena6.zip" \
+            --arg sha256_mac_arena6 "$(sha256sum dist/ScreenCapture-mac-arena6.zip | cut -d' ' -f1)" \
             --arg notes "$notes" \
-            '{version: $version, url: $url, sha256: $sha256, url_mac: $url_mac, sha256_mac: $sha256_mac, notes: $notes}' > latest.json
+            '{version: $version, url: $url, sha256: $sha256, url_mac: $url_mac, sha256_mac: $sha256_mac, url_mac_arena6: $url_mac_arena6, sha256_mac_arena6: $sha256_mac_arena6, notes: $notes}' > latest.json
           cat latest.json
 
       - name: Publish GitHub release
@@ -98,5 +105,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: >
           gh release create "$GITHUB_REF_NAME"
-          dist/ScreenCapture.dll dist/ScreenCapture-mac.zip latest.json
+          dist/ScreenCapture.dll dist/ScreenCapture-mac.zip dist/ScreenCapture-mac-arena6.zip latest.json
           --title "$GITHUB_REF_NAME" --notes-file notes.txt
